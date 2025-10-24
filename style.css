@@ -1,0 +1,73 @@
+:root {
+  color-scheme: dark;
+  font-family: "Helvetica Neue", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: radial-gradient(circle at 20% 10%, #111628, #05060c 60%);
+  color: rgba(255, 255, 255, 0.85);
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  overflow: hidden;
+}
+
+#experience {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+#experience canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.overlay {
+  position: absolute;
+  top: 2.5rem;
+  left: 2.5rem;
+  max-width: min(22rem, 40vw);
+  padding: 1.5rem 1.75rem;
+  background: rgba(4, 7, 15, 0.42);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 1.25rem;
+  backdrop-filter: blur(14px);
+  box-shadow: 0 24px 60px rgba(6, 12, 28, 0.55);
+}
+
+.overlay h1 {
+  margin: 0 0 0.5rem 0;
+  font-size: clamp(1.65rem, 4vw, 2.6rem);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.overlay p {
+  margin: 0;
+  font-size: clamp(0.95rem, 2.2vw, 1.1rem);
+  color: rgba(255, 255, 255, 0.65);
+  letter-spacing: 0.06em;
+}
+
+@media (max-width: 600px) {
+  .overlay {
+    top: 1.5rem;
+    left: 1.5rem;
+    padding: 1.25rem 1.5rem;
+    border-radius: 1rem;
+  }
+}
