@@ -13,6 +13,37 @@
         <h1>Glass Sphere Sanctuary</h1>
         <p>Soft light, calm motion, endless reflections.</p>
       </section>
+      <section class="control-panel">
+        <h2>Liquid Glass Controls</h2>
+        <div class="control">
+          <div class="control-top">
+            <label for="sphere-count">Number of spheres</label>
+            <span class="control-value" data-value-for="sphere-count" aria-live="polite">18</span>
+          </div>
+          <input type="range" id="sphere-count" min="6" max="36" value="18" step="1" />
+        </div>
+        <div class="control">
+          <div class="control-top">
+            <label for="refraction-level">Refraction level</label>
+            <span class="control-value" data-value-for="refraction-level" aria-live="polite">1.52</span>
+          </div>
+          <input type="range" id="refraction-level" min="1.1" max="1.9" value="1.52" step="0.01" />
+        </div>
+        <div class="control">
+          <div class="control-top">
+            <label for="scene-brightness">Scene brightness</label>
+            <span class="control-value" data-value-for="scene-brightness" aria-live="polite">1.00</span>
+          </div>
+          <input type="range" id="scene-brightness" min="0.6" max="1.8" value="1" step="0.05" />
+        </div>
+        <div class="control">
+          <div class="control-top">
+            <label for="movement-speed">Sphere movement</label>
+            <span class="control-value" data-value-for="movement-speed" aria-live="polite">1.40×</span>
+          </div>
+          <input type="range" id="movement-speed" min="0.5" max="3" value="1.4" step="0.05" />
+        </div>
+      </section>
     </main>
     <script type="importmap">
       {
