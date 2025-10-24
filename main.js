@@ -4,8 +4,8 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 const container = document.getElementById("experience");
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.25;
@@ -71,6 +71,33 @@ scene.add(sphereGroup);
 
 const spheres = [];
 
+const collisionDelta = new THREE.Vector3();
+const collisionNormal = new THREE.Vector3();
+const collisionRelativeVelocity = new THREE.Vector3();
+const maintainTempDirection = new THREE.Vector3();
+const fallbackDirection = new THREE.Vector3();
+const godRayAlignmentVector = new THREE.Vector3(0, -1, 0);
+const defaultLightDirection = new THREE.Vector3(0, 1, 0);
+const lightDirectionTemp = new THREE.Vector3();
+const candidatePosition = new THREE.Vector3();
+const tempQuaternion = new THREE.Quaternion();
+
+const godRayGeometry = new THREE.ConeGeometry(1, 1.6, 24, 1, true);
+godRayGeometry.translate(0, -0.8, 0);
+const godRayBaseMaterial = new THREE.MeshBasicMaterial({
+  color: 0xffffff,
+  transparent: true,
+  opacity: 0.3,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  toneMapped: false,
+  side: THREE.DoubleSide
+});
+
+godRayBaseMaterial.name = "SphereGodRayMaterial";
+
+godRayGeometry.name = "SphereGodRayGeometry";
+
 function getRandomPaletteIndex(excludeIndex = null) {
   if (neonPastelPalette.length <= 1) {
     return 0;
@@ -98,6 +125,9 @@ function setSphereLightColor(sphere, paletteIndex) {
   sphere.colorIndex = safeIndex;
   const colorHex = paletteLength > 0 ? neonPastelPalette[safeIndex] : 0xffffff;
   sphere.light.color.setHex(colorHex);
+  if (sphere.godRay && sphere.godRay.material) {
+    sphere.godRay.material.color.setHex(colorHex);
+  }
 }
 
 function cycleSphereLightColor(sphere) {
@@ -119,26 +149,39 @@ function updateSphereLightIntensity(sphere) {
 }
 
 function updateSphereLightDirection(sphere) {
-  const { light, lightTarget, velocity, radius } = sphere;
+  const { light, lightTarget, velocity, radius, godRay } = sphere;
   if (!light || !lightTarget) {
     return;
   }
 
   if (!sphere.lastLightDirection) {
-    sphere.lastLightDirection = new THREE.Vector3(0, 1, 0);
+    sphere.lastLightDirection = defaultLightDirection.clone();
   }
 
-  const hasVelocity = velocity.lengthSq() > 1e-6;
-  const direction = hasVelocity ? velocity.clone().normalize() : sphere.lastLightDirection.clone();
+  lightDirectionTemp.copy(velocity);
+  const hasVelocity = lightDirectionTemp.lengthSq() > 1e-6;
 
-  if (direction.lengthSq() < 1e-6) {
-    direction.set(0, 1, 0);
+  if (hasVelocity) {
+    lightDirectionTemp.normalize();
+  } else {
+    lightDirectionTemp.copy(sphere.lastLightDirection);
   }
 
-  sphere.lastLightDirection.copy(direction);
+  if (lightDirectionTemp.lengthSq() < 1e-6) {
+    lightDirectionTemp.copy(defaultLightDirection);
+  }
+
+  sphere.lastLightDirection.copy(lightDirectionTemp);
 
   const targetDistance = Math.max(radius * 0.8, 0.1);
-  lightTarget.position.copy(direction.multiplyScalar(targetDistance));
+  lightTarget.position.copy(lightDirectionTemp).multiplyScalar(targetDistance);
+
+  if (godRay) {
+    tempQuaternion.setFromUnitVectors(godRayAlignmentVector, lightDirectionTemp);
+    godRay.quaternion.copy(tempQuaternion);
+    const baseOpacity = sphere.baseGodRayOpacity || 0.28;
+    godRay.material.opacity = baseOpacity * uiState.brightness;
+  }
 }
 
 function onSphereCollision(sphere) {
@@ -150,6 +193,8 @@ const sphereConfig = {
   maxRadius: 1.25
 };
 
+const sphereSpeedRange = { min: 1.9, max: 2.8 };
+
 const sphereCountRange = { min: 6, max: 36 };
 const refractionRange = { min: 1.1, max: 1.9 };
 const thicknessScaleRange = { min: 0.85, max: 1.35 };
@@ -157,10 +202,10 @@ const brightnessRange = { min: 0.6, max: 1.8 };
 const speedRange = { min: 0.5, max: 3 };
 
 const uiState = {
-  sphereCount: 18,
+  sphereCount: 12,
   refraction: 1.52,
   brightness: 1,
-  speed: 1.4
+  speed: 2
 };
 
 const motionState = {
@@ -212,15 +257,14 @@ function renderLoop() {
 
 function updateSpheres(delta, time) {
   const effectiveDelta = delta * motionState.speedMultiplier;
-  const damping = Math.max(0, 1 - effectiveDelta * 0.02);
   const restitution = 0.9;
+  const count = spheres.length;
 
-  for (let i = 0; i < spheres.length; i += 1) {
+  for (let i = 0; i < count; i += 1) {
     const sphere = spheres[i];
-    const { mesh, velocity, radius, hueDrift } = sphere;
+    const { mesh, velocity, hueDrift } = sphere;
 
     mesh.position.addScaledVector(velocity, effectiveDelta);
-    velocity.multiplyScalar(damping);
 
     const collidedWithBounds = enforceBounds(sphere);
 
@@ -237,17 +281,52 @@ function updateSpheres(delta, time) {
     }
   }
 
-  for (let i = 0; i < spheres.length - 1; i += 1) {
+  for (let i = 0; i < count - 1; i += 1) {
     const a = spheres[i];
-    for (let j = i + 1; j < spheres.length; j += 1) {
+    for (let j = i + 1; j < count; j += 1) {
       const b = spheres[j];
       resolveSphereCollision(a, b, restitution);
     }
   }
 
-  spheres.forEach((sphere) => {
+  for (let i = 0; i < count; i += 1) {
+    const sphere = spheres[i];
+    maintainSphereSpeed(sphere);
     updateSphereLightDirection(sphere);
-  });
+  }
+}
+
+function maintainSphereSpeed(sphere) {
+  const { velocity, baseSpeed, lastLightDirection } = sphere;
+  if (!velocity || !Number.isFinite(baseSpeed) || baseSpeed <= 0) {
+    return;
+  }
+
+  const currentSpeed = velocity.length();
+  if (currentSpeed < 1e-6) {
+    if (lastLightDirection && lastLightDirection.lengthSq() > 1e-6) {
+      maintainTempDirection.copy(lastLightDirection);
+    } else {
+      fallbackDirection.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
+      if (fallbackDirection.lengthSq() < 1e-6) {
+        fallbackDirection.copy(defaultLightDirection);
+      }
+      maintainTempDirection.copy(fallbackDirection);
+    }
+
+    if (maintainTempDirection.lengthSq() < 1e-6) {
+      maintainTempDirection.copy(defaultLightDirection);
+    }
+
+    maintainTempDirection.normalize();
+    velocity.copy(maintainTempDirection).multiplyScalar(baseSpeed);
+    return;
+  }
+
+  const speedDelta = Math.abs(currentSpeed - baseSpeed);
+  if (speedDelta > baseSpeed * 0.0005) {
+    velocity.multiplyScalar(baseSpeed / currentSpeed);
+  }
 }
 
 function updateSphereCount(count) {
@@ -273,7 +352,7 @@ function updateSphereCount(count) {
 
 function addSphere() {
   const radius = THREE.MathUtils.lerp(sphereConfig.minRadius, sphereConfig.maxRadius, Math.random());
-  const geometry = new THREE.SphereGeometry(radius, 64, 64);
+  const geometry = new THREE.SphereGeometry(radius, 48, 48);
 
   const hue = Math.random();
   const saturation = 0.45 + Math.random() * 0.25;
@@ -319,8 +398,8 @@ function addSphere() {
     direction.set(1, 0, 0);
   }
   direction.normalize();
-  const speed = THREE.MathUtils.randFloat(0.75, 1.2);
-  const velocity = direction.clone().multiplyScalar(speed);
+  const baseSpeed = THREE.MathUtils.randFloat(sphereSpeedRange.min, sphereSpeedRange.max);
+  const velocity = direction.clone().multiplyScalar(baseSpeed);
 
   const colorIndex = getRandomPaletteIndex();
   const baseLightIntensity = THREE.MathUtils.mapLinear(
@@ -348,10 +427,39 @@ function addSphere() {
   light.position.set(0, 0, 0);
   light.target = lightTarget;
 
+  const godRayMaterial = godRayBaseMaterial.clone();
+  const baseGodRayOpacity = THREE.MathUtils.mapLinear(
+    radius,
+    sphereConfig.minRadius,
+    sphereConfig.maxRadius,
+    0.24,
+    0.34
+  );
+  godRayMaterial.opacity = baseGodRayOpacity * uiState.brightness;
+  const godRay = new THREE.Mesh(godRayGeometry, godRayMaterial);
+  const godRayRadiusScale = THREE.MathUtils.mapLinear(
+    radius,
+    sphereConfig.minRadius,
+    sphereConfig.maxRadius,
+    1.2,
+    1.65
+  );
+  const godRayLength = THREE.MathUtils.mapLinear(
+    radius,
+    sphereConfig.minRadius,
+    sphereConfig.maxRadius,
+    7.5,
+    11.5
+  );
+  godRay.scale.set(godRayRadiusScale, godRayLength, godRayRadiusScale);
+  godRay.renderOrder = -5;
+  mesh.add(godRay);
+
   const sphereData = {
     mesh,
     radius,
     velocity,
+    baseSpeed,
     hue,
     saturation,
     lightness,
@@ -362,6 +470,8 @@ function addSphere() {
     lightTarget,
     baseLightIntensity,
     colorIndex,
+    godRay,
+    baseGodRayOpacity,
     lastLightDirection: direction.clone()
   };
 
@@ -389,6 +499,15 @@ function removeSphere() {
 
   if (sphere.lightTarget && sphere.lightTarget.parent) {
     sphere.lightTarget.parent.remove(sphere.lightTarget);
+  }
+
+  if (sphere.godRay) {
+    if (sphere.godRay.parent) {
+      sphere.godRay.parent.remove(sphere.godRay);
+    }
+    if (sphere.godRay.material) {
+      sphere.godRay.material.dispose();
+    }
   }
 
   sphereGroup.remove(sphere.mesh);
@@ -431,6 +550,10 @@ function updateBrightness(level) {
 
   spheres.forEach((sphere) => {
     updateSphereLightIntensity(sphere);
+    if (sphere.godRay && sphere.godRay.material) {
+      const baseOpacity = sphere.baseGodRayOpacity || 0.28;
+      sphere.godRay.material.opacity = baseOpacity * value;
+    }
   });
   renderer.toneMappingExposure = 1.25 * value;
 }
@@ -544,32 +667,40 @@ function enforceBounds(sphere) {
 function resolveSphereCollision(a, b, restitution) {
   const posA = a.mesh.position;
   const posB = b.mesh.position;
-  const delta = new THREE.Vector3().subVectors(posB, posA);
+  collisionDelta.subVectors(posB, posA);
   const minDistance = a.radius + b.radius;
-  const distanceSq = delta.lengthSq();
+  let distanceSq = collisionDelta.lengthSq();
   let collisionOccurred = false;
 
   if (distanceSq === 0) {
-    delta.set(Math.random() * 0.01, Math.random() * 0.01, Math.random() * 0.01);
+    fallbackDirection.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
+    if (fallbackDirection.lengthSq() < 1e-6) {
+      fallbackDirection.set(1, 0, 0);
+    }
+    fallbackDirection.normalize().multiplyScalar(0.001);
+    collisionDelta.copy(fallbackDirection);
+    distanceSq = collisionDelta.lengthSq();
   }
 
-  if (distanceSq <= minDistance * minDistance) {
+  const minDistanceSq = minDistance * minDistance;
+
+  if (distanceSq <= minDistanceSq) {
     const distance = Math.sqrt(distanceSq) || 0.0001;
-    const normal = delta.clone().divideScalar(distance);
+    collisionNormal.copy(collisionDelta).divideScalar(distance);
     const overlap = minDistance - distance;
 
-    posA.addScaledVector(normal, -overlap * 0.5);
-    posB.addScaledVector(normal, overlap * 0.5);
+    posA.addScaledVector(collisionNormal, -overlap * 0.5);
+    posB.addScaledVector(collisionNormal, overlap * 0.5);
 
-    const relativeVelocity = a.velocity.clone().sub(b.velocity);
-    const velAlongNormal = relativeVelocity.dot(normal);
+    collisionRelativeVelocity.copy(a.velocity).sub(b.velocity);
+    const velAlongNormal = collisionRelativeVelocity.dot(collisionNormal);
 
     if (velAlongNormal < 0) {
       const impulseMagnitude = -((1 + restitution) * velAlongNormal) / 2;
-      const impulse = normal.multiplyScalar(impulseMagnitude);
+      collisionNormal.multiplyScalar(impulseMagnitude);
 
-      a.velocity.add(impulse);
-      b.velocity.sub(impulse);
+      a.velocity.add(collisionNormal);
+      b.velocity.sub(collisionNormal);
       collisionOccurred = true;
     }
   }
@@ -578,13 +709,16 @@ function resolveSphereCollision(a, b, restitution) {
     onSphereCollision(a);
     onSphereCollision(b);
   }
+
+  return collisionOccurred;
 }
 
 function generateNonCollidingPosition(radius) {
   const maxAttempts = 400;
+  const limit = halfRoom - radius - 0.3;
+
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const limit = halfRoom - radius - 0.3;
-    const position = new THREE.Vector3(
+    candidatePosition.set(
       THREE.MathUtils.randFloatSpread(limit * 2),
       THREE.MathUtils.randFloatSpread(limit * 2),
       THREE.MathUtils.randFloatSpread(limit * 2)
@@ -594,14 +728,14 @@ function generateNonCollidingPosition(radius) {
     for (let i = 0; i < spheres.length; i += 1) {
       const other = spheres[i];
       const minDistance = radius + other.radius + 0.25;
-      if (position.distanceTo(other.mesh.position) < minDistance) {
+      if (candidatePosition.distanceTo(other.mesh.position) < minDistance) {
         intersects = true;
         break;
       }
     }
 
     if (!intersects) {
-      return position;
+      return candidatePosition.clone();
     }
   }
 
