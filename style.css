@@ -115,39 +115,6 @@ body {
   color: rgba(255, 255, 255, 0.9);
 }
 
-.toggle-button {
-  align-self: flex-start;
-  appearance: none;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: rgba(11, 18, 32, 0.6);
-  color: rgba(255, 255, 255, 0.85);
-  padding: 0.65rem 1.25rem;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.toggle-button:hover,
-.toggle-button:focus-visible {
-  background: rgba(123, 216, 255, 0.16);
-  border-color: rgba(123, 216, 255, 0.55);
-  color: rgba(255, 255, 255, 0.95);
-  box-shadow: 0 0 0 1px rgba(123, 216, 255, 0.2);
-}
-
-.toggle-button[aria-pressed="true"] {
-  background: rgba(123, 216, 255, 0.22);
-  border-color: rgba(123, 216, 255, 0.65);
-  color: rgba(255, 255, 255, 0.98);
-}
-
-.toggle-button:focus-visible {
-  outline: none;
-}
-
 .control-panel input[type="range"] {
   width: 100%;
   height: 0.35rem;
