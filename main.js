@@ -57,45 +57,93 @@ const roomMaterial = new THREE.MeshPhysicalMaterial({
 const roomMesh = new THREE.Mesh(roomGeometry, roomMaterial);
 scene.add(roomMesh);
 
-const ambientLight = new THREE.AmbientLight(new THREE.Color(0x111d2b), 1.1);
-scene.add(ambientLight);
-const baseAmbientIntensity = ambientLight.intensity;
-
-const lightConfigs = [
-  {
-    color: 0xff8fb7,
-    intensity: 240,
-    radius: new THREE.Vector3(0.55, 0.32, 0.48),
-    speed: new THREE.Vector3(0.18, 0.09, 0.14),
-    phase: new THREE.Vector3(0.4, 1.2, 2.1)
-  },
-  {
-    color: 0x7bd8ff,
-    intensity: 270,
-    radius: new THREE.Vector3(0.68, 0.4, 0.55),
-    speed: new THREE.Vector3(0.13, 0.07, 0.11),
-    phase: new THREE.Vector3(1.7, 0.4, 3.4)
-  },
-  {
-    color: 0xa1ffcf,
-    intensity: 230,
-    radius: new THREE.Vector3(0.6, 0.46, 0.52),
-    speed: new THREE.Vector3(0.16, 0.1, 0.17),
-    phase: new THREE.Vector3(4.2, 2.4, 0.9)
-  }
+const neonPastelPalette = [
+  0xff8bd1,
+  0xffb38a,
+  0xfff59e,
+  0xffd1ff,
+  0xffc2a1,
+  0xffa5e0
 ];
-
-const dynamicLights = lightConfigs.map((config) => {
-  const light = new THREE.PointLight(config.color, config.intensity, 0, 2);
-  light.decay = 2;
-  scene.add(light);
-  return { light, baseIntensity: config.intensity, ...config };
-});
 
 const sphereGroup = new THREE.Group();
 scene.add(sphereGroup);
 
 const spheres = [];
+
+function getRandomPaletteIndex(excludeIndex = null) {
+  if (neonPastelPalette.length <= 1) {
+    return 0;
+  }
+
+  let index = Math.floor(Math.random() * neonPastelPalette.length);
+  if (excludeIndex === null) {
+    return index;
+  }
+
+  while (index === excludeIndex) {
+    index = Math.floor(Math.random() * neonPastelPalette.length);
+  }
+
+  return index;
+}
+
+function setSphereLightColor(sphere, paletteIndex) {
+  if (!sphere.light) {
+    return;
+  }
+
+  const paletteLength = neonPastelPalette.length;
+  const safeIndex = paletteLength > 0 ? THREE.MathUtils.euclideanModulo(paletteIndex, paletteLength) : 0;
+  sphere.colorIndex = safeIndex;
+  const colorHex = paletteLength > 0 ? neonPastelPalette[safeIndex] : 0xffffff;
+  sphere.light.color.setHex(colorHex);
+}
+
+function cycleSphereLightColor(sphere) {
+  if (!sphere.light) {
+    return;
+  }
+
+  const currentIndex = typeof sphere.colorIndex === "number" ? sphere.colorIndex : null;
+  const nextIndex = getRandomPaletteIndex(currentIndex);
+  setSphereLightColor(sphere, nextIndex);
+}
+
+function updateSphereLightIntensity(sphere) {
+  if (!sphere.light) {
+    return;
+  }
+
+  sphere.light.intensity = sphere.baseLightIntensity * uiState.brightness;
+}
+
+function updateSphereLightDirection(sphere) {
+  const { light, lightTarget, velocity, radius } = sphere;
+  if (!light || !lightTarget) {
+    return;
+  }
+
+  if (!sphere.lastLightDirection) {
+    sphere.lastLightDirection = new THREE.Vector3(0, 1, 0);
+  }
+
+  const hasVelocity = velocity.lengthSq() > 1e-6;
+  const direction = hasVelocity ? velocity.clone().normalize() : sphere.lastLightDirection.clone();
+
+  if (direction.lengthSq() < 1e-6) {
+    direction.set(0, 1, 0);
+  }
+
+  sphere.lastLightDirection.copy(direction);
+
+  const targetDistance = Math.max(radius * 0.8, 0.1);
+  lightTarget.position.copy(direction.multiplyScalar(targetDistance));
+}
+
+function onSphereCollision(sphere) {
+  cycleSphereLightColor(sphere);
+}
 
 const sphereConfig = {
   minRadius: 0.65,
@@ -155,33 +203,26 @@ function renderLoop() {
   const delta = Math.min(clock.getDelta(), 0.033);
   elapsedTime += delta;
 
-  updateLights(elapsedTime);
   updateSpheres(delta, elapsedTime);
   controls.update();
 
   renderer.render(scene, camera);
 }
 
-function updateLights(time) {
-  dynamicLights.forEach(({ light, radius, speed, phase }) => {
-    const x = Math.sin(time * speed.x + phase.x) * roomSize * radius.x;
-    const y = Math.cos(time * speed.y + phase.y) * roomSize * radius.y + roomSize * 0.05;
-    const z = Math.sin(time * speed.z + phase.z) * roomSize * radius.z;
-    light.position.set(x, y, z);
-  });
-}
 
 function updateSpheres(delta, time) {
   const effectiveDelta = delta * motionState.speedMultiplier;
   const damping = Math.max(0, 1 - effectiveDelta * 0.02);
   const restitution = 0.9;
 
-  spheres.forEach((sphere) => {
+  for (let i = 0; i < spheres.length; i += 1) {
+    const sphere = spheres[i];
     const { mesh, velocity, radius, hueDrift } = sphere;
+
     mesh.position.addScaledVector(velocity, effectiveDelta);
     velocity.multiplyScalar(damping);
 
-    enforceBounds(mesh.position, velocity, radius);
+    const collidedWithBounds = enforceBounds(sphere);
 
     const hue = (sphere.hue + time * hueDrift) % 1;
     const material = mesh.material;
@@ -190,7 +231,11 @@ function updateSpheres(delta, time) {
       material.sheenColor.setHSL((hue + 0.05) % 1, sphere.saturation * 0.6, 0.6);
     }
     material.envMapIntensity = 1.25 + Math.sin(time * 0.4 + sphere.phase) * 0.25;
-  });
+
+    if (collidedWithBounds) {
+      onSphereCollision(sphere);
+    }
+  }
 
   for (let i = 0; i < spheres.length - 1; i += 1) {
     const a = spheres[i];
@@ -199,6 +244,10 @@ function updateSpheres(delta, time) {
       resolveSphereCollision(a, b, restitution);
     }
   }
+
+  spheres.forEach((sphere) => {
+    updateSphereLightDirection(sphere);
+  });
 }
 
 function updateSphereCount(count) {
@@ -271,9 +320,35 @@ function addSphere() {
   }
   direction.normalize();
   const speed = THREE.MathUtils.randFloat(0.75, 1.2);
-  const velocity = direction.multiplyScalar(speed);
+  const velocity = direction.clone().multiplyScalar(speed);
 
-  spheres.push({
+  const colorIndex = getRandomPaletteIndex();
+  const baseLightIntensity = THREE.MathUtils.mapLinear(
+    radius,
+    sphereConfig.minRadius,
+    sphereConfig.maxRadius,
+    160,
+    260
+  );
+  const lightDistance = radius * 14;
+  const light = new THREE.SpotLight(
+    neonPastelPalette[colorIndex],
+    baseLightIntensity * uiState.brightness,
+    lightDistance,
+    Math.PI * 0.35,
+    0.6,
+    2
+  );
+  light.castShadow = false;
+
+  const lightTarget = new THREE.Object3D();
+  lightTarget.position.set(0, 0, 1);
+  mesh.add(light);
+  mesh.add(lightTarget);
+  light.position.set(0, 0, 0);
+  light.target = lightTarget;
+
+  const sphereData = {
     mesh,
     radius,
     velocity,
@@ -282,14 +357,38 @@ function addSphere() {
     lightness,
     hueDrift: THREE.MathUtils.randFloat(0.012, 0.02),
     phase: Math.random() * Math.PI * 2,
-    baseThickness
-  });
+    baseThickness,
+    light,
+    lightTarget,
+    baseLightIntensity,
+    colorIndex,
+    lastLightDirection: direction.clone()
+  };
+
+  setSphereLightColor(sphereData, colorIndex);
+  updateSphereLightIntensity(sphereData);
+  updateSphereLightDirection(sphereData);
+
+  spheres.push(sphereData);
 }
 
 function removeSphere() {
   const sphere = spheres.pop();
   if (!sphere) {
     return;
+  }
+
+  if (sphere.light) {
+    if (sphere.light.parent) {
+      sphere.light.parent.remove(sphere.light);
+    }
+    if (typeof sphere.light.dispose === "function") {
+      sphere.light.dispose();
+    }
+  }
+
+  if (sphere.lightTarget && sphere.lightTarget.parent) {
+    sphere.lightTarget.parent.remove(sphere.lightTarget);
   }
 
   sphereGroup.remove(sphere.mesh);
@@ -330,9 +429,8 @@ function updateBrightness(level) {
   }
   setControlValue(uiElements.brightnessValue, value, { decimals: 2 });
 
-  ambientLight.intensity = baseAmbientIntensity * value;
-  dynamicLights.forEach(({ light, baseIntensity }) => {
-    light.intensity = baseIntensity * value;
+  spheres.forEach((sphere) => {
+    updateSphereLightIntensity(sphere);
   });
   renderer.toneMappingExposure = 1.25 * value;
 }
@@ -404,32 +502,43 @@ function disposeMaterial(material) {
   }
 }
 
-function enforceBounds(position, velocity, radius) {
+function enforceBounds(sphere) {
+  const { mesh, velocity, radius } = sphere;
+  const position = mesh.position;
   const limit = halfRoom - radius;
+  let collided = false;
 
   if (position.x > limit) {
     position.x = limit;
-    velocity.x *= -1;
+    velocity.x = -Math.abs(velocity.x);
+    collided = true;
   } else if (position.x < -limit) {
     position.x = -limit;
-    velocity.x *= -1;
+    velocity.x = Math.abs(velocity.x);
+    collided = true;
   }
 
   if (position.y > limit) {
     position.y = limit;
-    velocity.y *= -1;
+    velocity.y = -Math.abs(velocity.y);
+    collided = true;
   } else if (position.y < -limit) {
     position.y = -limit;
-    velocity.y *= -1;
+    velocity.y = Math.abs(velocity.y);
+    collided = true;
   }
 
   if (position.z > limit) {
     position.z = limit;
-    velocity.z *= -1;
+    velocity.z = -Math.abs(velocity.z);
+    collided = true;
   } else if (position.z < -limit) {
     position.z = -limit;
-    velocity.z *= -1;
+    velocity.z = Math.abs(velocity.z);
+    collided = true;
   }
+
+  return collided;
 }
 
 function resolveSphereCollision(a, b, restitution) {
@@ -438,6 +547,7 @@ function resolveSphereCollision(a, b, restitution) {
   const delta = new THREE.Vector3().subVectors(posB, posA);
   const minDistance = a.radius + b.radius;
   const distanceSq = delta.lengthSq();
+  let collisionOccurred = false;
 
   if (distanceSq === 0) {
     delta.set(Math.random() * 0.01, Math.random() * 0.01, Math.random() * 0.01);
@@ -460,7 +570,13 @@ function resolveSphereCollision(a, b, restitution) {
 
       a.velocity.add(impulse);
       b.velocity.sub(impulse);
+      collisionOccurred = true;
     }
+  }
+
+  if (collisionOccurred) {
+    onSphereCollision(a);
+    onSphereCollision(b);
   }
 }
 
