@@ -74,6 +74,7 @@ const spheres = [];
 const collisionDelta = new THREE.Vector3();
 const collisionNormal = new THREE.Vector3();
 const collisionRelativeVelocity = new THREE.Vector3();
+const collisionImpulse = new THREE.Vector3();
 const maintainTempDirection = new THREE.Vector3();
 const fallbackDirection = new THREE.Vector3();
 const godRayAlignmentVector = new THREE.Vector3(0, -1, 0);
@@ -354,9 +355,14 @@ function onSphereCollision(sphere) {
   cycleSphereLightColor(sphere);
 }
 
+const sphereSizeModes = [
+  { key: "standard", label: "Standard", minRadius: 0.65, maxRadius: 1.25 },
+  { key: "grand", label: "Grand", minRadius: 1.05, maxRadius: 1.5 }
+];
+const defaultSphereSizeMode = sphereSizeModes[0];
 const sphereConfig = {
-  minRadius: 0.65,
-  maxRadius: 1.25
+  minRadius: defaultSphereSizeMode.minRadius,
+  maxRadius: defaultSphereSizeMode.maxRadius
 };
 
 const sphereSpeedRange = { min: 1.9, max: 2.8 };
@@ -368,6 +374,7 @@ const brightnessRange = { min: 0.6, max: 1.8 };
 const speedRange = { min: 0.5, max: 3 };
 
 const uiState = {
+  sphereSizeMode: defaultSphereSizeMode.key,
   sphereCount: 12,
   refraction: 1.52,
   brightness: 1,
@@ -381,6 +388,8 @@ const motionState = {
 const uiElements = {
   sphereCountInput: document.getElementById("sphere-count"),
   sphereCountValue: document.querySelector('[data-value-for="sphere-count"]'),
+  sphereSizeButton: document.getElementById("sphere-size-toggle"),
+  sphereSizeValue: document.querySelector('[data-value-for="sphere-size"]'),
   refractionInput: document.getElementById("refraction-level"),
   refractionValue: document.querySelector('[data-value-for="refraction-level"]'),
   brightnessInput: document.getElementById("scene-brightness"),
@@ -388,6 +397,8 @@ const uiElements = {
   speedInput: document.getElementById("movement-speed"),
   speedValue: document.querySelector('[data-value-for="movement-speed"]')
 };
+
+setSphereSizeMode(uiState.sphereSizeMode, { rebuild: false });
 
 updateSphereCount(uiState.sphereCount);
 updateRefraction(uiState.refraction);
@@ -773,7 +784,65 @@ function setControlValue(element, value, { decimals = 2, suffix = "" } = {}) {
   element.textContent = `${textValue}${suffix}`;
 }
 
+function findSphereSizeMode(modeKey) {
+  if (!modeKey) {
+    return defaultSphereSizeMode;
+  }
+
+  return sphereSizeModes.find((mode) => mode.key === modeKey) || defaultSphereSizeMode;
+}
+
+function getNextSphereSizeMode(modeKey) {
+  const currentIndex = sphereSizeModes.findIndex((mode) => mode.key === modeKey);
+  const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % sphereSizeModes.length;
+  return sphereSizeModes[nextIndex];
+}
+
+function updateSphereSizeUi(mode) {
+  if (uiElements.sphereSizeValue) {
+    setControlValue(uiElements.sphereSizeValue, mode.label, { decimals: null });
+  }
+
+  if (uiElements.sphereSizeButton) {
+    const nextMode = getNextSphereSizeMode(mode.key);
+    uiElements.sphereSizeButton.textContent = `Switch to ${nextMode.label}`;
+    const isDefaultMode = mode.key === defaultSphereSizeMode.key;
+    uiElements.sphereSizeButton.setAttribute("aria-pressed", isDefaultMode ? "false" : "true");
+  }
+}
+
+function setSphereSizeMode(modeKey, { rebuild = true } = {}) {
+  const mode = findSphereSizeMode(modeKey);
+  uiState.sphereSizeMode = mode.key;
+  sphereConfig.minRadius = mode.minRadius;
+  sphereConfig.maxRadius = mode.maxRadius;
+  updateSphereSizeUi(mode);
+
+  if (rebuild) {
+    rebuildSpheresWithCurrentConfig();
+  }
+}
+
+function rebuildSpheresWithCurrentConfig() {
+  const targetCount = uiState.sphereCount;
+
+  while (spheres.length > 0) {
+    removeSphere();
+  }
+
+  for (let i = 0; i < targetCount; i += 1) {
+    addSphere();
+  }
+}
+
 function initializeUiControls() {
+  if (uiElements.sphereSizeButton) {
+    uiElements.sphereSizeButton.addEventListener("click", () => {
+      const nextMode = getNextSphereSizeMode(uiState.sphereSizeMode);
+      setSphereSizeMode(nextMode.key);
+    });
+  }
+
   if (uiElements.sphereCountInput) {
     uiElements.sphereCountInput.addEventListener("input", (event) => {
       updateSphereCount(Number(event.target.value));
@@ -884,12 +953,31 @@ function resolveSphereCollision(a, b, restitution) {
     collisionRelativeVelocity.copy(a.velocity).sub(b.velocity);
     const velAlongNormal = collisionRelativeVelocity.dot(collisionNormal);
 
-    if (velAlongNormal < 0) {
+    if (velAlongNormal > 0) {
       const impulseMagnitude = -((1 + restitution) * velAlongNormal) / 2;
-      collisionNormal.multiplyScalar(impulseMagnitude);
+      collisionImpulse.copy(collisionNormal).multiplyScalar(impulseMagnitude);
 
-      a.velocity.add(collisionNormal);
-      b.velocity.sub(collisionNormal);
+      a.velocity.add(collisionImpulse);
+      b.velocity.sub(collisionImpulse);
+      collisionOccurred = true;
+    }
+
+    const reflectionFactor = 1 + restitution;
+    let reflectionApplied = false;
+
+    const postNormalA = a.velocity.dot(collisionNormal);
+    if (postNormalA > 0) {
+      a.velocity.addScaledVector(collisionNormal, -reflectionFactor * postNormalA);
+      reflectionApplied = true;
+    }
+
+    const postNormalB = b.velocity.dot(collisionNormal);
+    if (postNormalB < 0) {
+      b.velocity.addScaledVector(collisionNormal, -reflectionFactor * postNormalB);
+      reflectionApplied = true;
+    }
+
+    if (reflectionApplied) {
       collisionOccurred = true;
     }
   }
