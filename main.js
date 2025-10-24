@@ -40,7 +40,7 @@ controls.zoomSpeed = 0.75;
 controls.minPolarAngle = Math.PI * 0.08;
 controls.maxPolarAngle = Math.PI - Math.PI * 0.12;
 controls.minDistance = roomSize * 0.18;
-controls.maxDistance = roomSize * 0.85;
+controls.maxDistance = roomSize * 1.8;
 controls.update();
 
 const roomGeometry = new THREE.BoxGeometry(roomSize, roomSize, roomSize);
@@ -82,21 +82,158 @@ const lightDirectionTemp = new THREE.Vector3();
 const candidatePosition = new THREE.Vector3();
 const tempQuaternion = new THREE.Quaternion();
 
-const godRayGeometry = new THREE.ConeGeometry(1, 1.6, 24, 1, true);
-godRayGeometry.translate(0, -0.8, 0);
-const godRayBaseMaterial = new THREE.MeshBasicMaterial({
-  color: 0xffffff,
-  transparent: true,
-  opacity: 0.3,
-  blending: THREE.AdditiveBlending,
-  depthWrite: false,
-  toneMapped: false,
-  side: THREE.DoubleSide
-});
+const GOD_RAY_BASE_RADIUS = 1;
+const GOD_RAY_BASE_HEIGHT = 1.6;
 
-godRayBaseMaterial.name = "SphereGodRayMaterial";
-
+const godRayGeometry = new THREE.ConeGeometry(GOD_RAY_BASE_RADIUS, GOD_RAY_BASE_HEIGHT, 36, 1, true);
+godRayGeometry.translate(0, -GOD_RAY_BASE_HEIGHT * 0.5, 0);
 godRayGeometry.name = "SphereGodRayGeometry";
+
+const godRayVertexShader = /* glsl */ `
+  varying vec3 vWorldPosition;
+  varying vec3 vOrigin;
+  varying vec3 vAxisDirection;
+
+  void main() {
+    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+    vWorldPosition = worldPosition.xyz;
+    vOrigin = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vAxisDirection = normalize((modelMatrix * vec4(0.0, -1.0, 0.0, 0.0)).xyz);
+    gl_Position = projectionMatrix * viewMatrix * worldPosition;
+  }
+`;
+
+const godRayFragmentShader = /* glsl */ `
+  precision highp float;
+
+  varying vec3 vWorldPosition;
+  varying vec3 vOrigin;
+  varying vec3 vAxisDirection;
+
+  uniform vec3 uColor;
+  uniform float uTime;
+  uniform float uIntensity;
+  uniform float uConeRadius;
+  uniform float uConeLength;
+  uniform vec2 uNoiseScale;
+
+  float hash(vec3 p) {
+    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+    p += dot(p, p.yzx + 19.19);
+    return fract(p.x * p.y * p.z);
+  }
+
+  float noise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+
+    float n000 = hash(i + vec3(0.0, 0.0, 0.0));
+    float n100 = hash(i + vec3(1.0, 0.0, 0.0));
+    float n010 = hash(i + vec3(0.0, 1.0, 0.0));
+    float n110 = hash(i + vec3(1.0, 1.0, 0.0));
+    float n001 = hash(i + vec3(0.0, 0.0, 1.0));
+    float n101 = hash(i + vec3(1.0, 0.0, 1.0));
+    float n011 = hash(i + vec3(0.0, 1.0, 1.0));
+    float n111 = hash(i + vec3(1.0, 1.0, 1.0));
+
+    float nx00 = mix(n000, n100, f.x);
+    float nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x);
+    float nx11 = mix(n011, n111, f.x);
+
+    float nxy0 = mix(nx00, nx10, f.y);
+    float nxy1 = mix(nx01, nx11, f.y);
+
+    return mix(nxy0, nxy1, f.z);
+  }
+
+  const int MARCH_STEPS = 8;
+
+  void main() {
+    vec3 toFragment = vWorldPosition - vOrigin;
+    float heightAlongAxis = dot(toFragment, -vAxisDirection);
+    if (heightAlongAxis < 0.0) {
+      discard;
+    }
+
+    float normalizedHeight = clamp(heightAlongAxis / uConeLength, 0.0, 1.0);
+
+    vec3 axisPoint = vOrigin + (-vAxisDirection) * heightAlongAxis;
+    float radialDistance = length(vWorldPosition - axisPoint);
+    float radiusAtHeight = mix(uConeRadius * 0.18, uConeRadius, normalizedHeight);
+    float radialRatio = radialDistance / max(radiusAtHeight, 1e-4);
+
+    if (radialRatio > 1.1) {
+      discard;
+    }
+
+    float baseDensity = smoothstep(1.1, 0.0, radialRatio);
+    float axialFalloff = smoothstep(1.12, 0.0, normalizedHeight);
+    float centerGlow = pow(1.0 - clamp(radialRatio, 0.0, 1.0), 6.0);
+
+    float marchStep = (uConeLength - heightAlongAxis) / float(MARCH_STEPS);
+    vec3 marchDirection = -vAxisDirection;
+    vec3 samplePoint = vWorldPosition;
+    float accumulated = 0.0;
+
+    for (int i = 0; i < MARCH_STEPS; i++) {
+      samplePoint += marchDirection * marchStep;
+      float sampleHeight = dot(samplePoint - vOrigin, -vAxisDirection);
+      float sampleNormHeight = clamp(sampleHeight / uConeLength, 0.0, 1.0);
+      vec3 sampleAxisPoint = vOrigin + (-vAxisDirection) * sampleHeight;
+      float sampleRadialDistance = length(samplePoint - sampleAxisPoint);
+      float sampleRadiusAtHeight = mix(uConeRadius * 0.18, uConeRadius, sampleNormHeight);
+      float normalizedSampleRadius = sampleRadialDistance / max(sampleRadiusAtHeight, 1e-4);
+      float sampleDensity = smoothstep(1.1, 0.0, normalizedSampleRadius) * smoothstep(1.05, 0.0, sampleNormHeight);
+      vec3 noisePoint = vec3(
+        samplePoint.x * uNoiseScale.x,
+        samplePoint.y * 0.35 + uTime * 0.25,
+        samplePoint.z * uNoiseScale.y
+      );
+      float n = noise(noisePoint);
+      accumulated += sampleDensity * mix(0.65, 1.15, n);
+    }
+
+    float averageScattering = accumulated / float(MARCH_STEPS);
+
+    vec3 shimmerPoint = vec3(
+      radialDistance * uNoiseScale.x,
+      heightAlongAxis * 0.3 + uTime * 0.45,
+      radialDistance * uNoiseScale.y
+    );
+    float shimmeringNoise = noise(shimmerPoint);
+
+    float softDiffuse = baseDensity * axialFalloff * mix(0.75, 1.25, shimmeringNoise);
+    float finalIntensity = (softDiffuse * 0.85 + averageScattering * 1.35 + centerGlow * 0.5) * uIntensity;
+
+    float alpha = clamp(finalIntensity, 0.0, 1.0);
+    gl_FragColor = vec4(uColor * finalIntensity, alpha);
+  }
+`;
+
+function createGodRayMaterial() {
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: new THREE.Color(0xffffff) },
+      uTime: { value: 0 },
+      uIntensity: { value: 0.3 },
+      uConeRadius: { value: GOD_RAY_BASE_RADIUS },
+      uConeLength: { value: GOD_RAY_BASE_HEIGHT },
+      uNoiseScale: { value: new THREE.Vector2(1.05, 1.35) }
+    },
+    vertexShader: godRayVertexShader,
+    fragmentShader: godRayFragmentShader,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    toneMapped: false
+  });
+
+  material.name = "SphereGodRayMaterial";
+  return material;
+}
 
 function getRandomPaletteIndex(excludeIndex = null) {
   if (neonPastelPalette.length <= 1) {
@@ -116,25 +253,24 @@ function getRandomPaletteIndex(excludeIndex = null) {
 }
 
 function setSphereLightColor(sphere, paletteIndex) {
-  if (!sphere.light) {
-    return;
-  }
-
   const paletteLength = neonPastelPalette.length;
   const safeIndex = paletteLength > 0 ? THREE.MathUtils.euclideanModulo(paletteIndex, paletteLength) : 0;
   sphere.colorIndex = safeIndex;
   const colorHex = paletteLength > 0 ? neonPastelPalette[safeIndex] : 0xffffff;
-  sphere.light.color.setHex(colorHex);
-  if (sphere.godRay && sphere.godRay.material) {
-    sphere.godRay.material.color.setHex(colorHex);
+  if (sphere.light) {
+    sphere.light.color.setHex(colorHex);
+  }
+  if (
+    sphere.godRay &&
+    sphere.godRay.material &&
+    sphere.godRay.material.uniforms &&
+    sphere.godRay.material.uniforms.uColor
+  ) {
+    sphere.godRay.material.uniforms.uColor.value.setHex(colorHex);
   }
 }
 
 function cycleSphereLightColor(sphere) {
-  if (!sphere.light) {
-    return;
-  }
-
   const currentIndex = typeof sphere.colorIndex === "number" ? sphere.colorIndex : null;
   const nextIndex = getRandomPaletteIndex(currentIndex);
   setSphereLightColor(sphere, nextIndex);
@@ -146,6 +282,38 @@ function updateSphereLightIntensity(sphere) {
   }
 
   sphere.light.intensity = sphere.baseLightIntensity * uiState.brightness;
+}
+
+function updateSphereGodRayStrength(sphere, brightnessMultiplier = uiState.brightness) {
+  if (
+    !sphere ||
+    !sphere.godRay ||
+    !sphere.godRay.material ||
+    !sphere.godRay.material.uniforms ||
+    !sphere.godRay.material.uniforms.uIntensity
+  ) {
+    return;
+  }
+
+  const baseStrength =
+    typeof sphere.baseGodRayStrength === "number" ? sphere.baseGodRayStrength : 0.28;
+  const safeBrightness = Math.max(brightnessMultiplier, 0);
+  sphere.godRay.material.uniforms.uIntensity.value = baseStrength * safeBrightness;
+}
+
+function updateSphereGodRayTime(sphere, time) {
+  if (
+    !sphere ||
+    !sphere.godRay ||
+    !sphere.godRay.material ||
+    !sphere.godRay.material.uniforms ||
+    !sphere.godRay.material.uniforms.uTime
+  ) {
+    return;
+  }
+
+  const offset = typeof sphere.godRayTimeOffset === "number" ? sphere.godRayTimeOffset : 0;
+  sphere.godRay.material.uniforms.uTime.value = time + offset;
 }
 
 function updateSphereLightDirection(sphere) {
@@ -179,8 +347,6 @@ function updateSphereLightDirection(sphere) {
   if (godRay) {
     tempQuaternion.setFromUnitVectors(godRayAlignmentVector, lightDirectionTemp);
     godRay.quaternion.copy(tempQuaternion);
-    const baseOpacity = sphere.baseGodRayOpacity || 0.28;
-    godRay.material.opacity = baseOpacity * uiState.brightness;
   }
 }
 
@@ -293,6 +459,7 @@ function updateSpheres(delta, time) {
     const sphere = spheres[i];
     maintainSphereSpeed(sphere);
     updateSphereLightDirection(sphere);
+    updateSphereGodRayTime(sphere, time);
   }
 }
 
@@ -427,16 +594,14 @@ function addSphere() {
   light.position.set(0, 0, 0);
   light.target = lightTarget;
 
-  const godRayMaterial = godRayBaseMaterial.clone();
-  const baseGodRayOpacity = THREE.MathUtils.mapLinear(
+  const godRayMaterial = createGodRayMaterial();
+  const baseGodRayStrength = THREE.MathUtils.mapLinear(
     radius,
     sphereConfig.minRadius,
     sphereConfig.maxRadius,
     0.24,
     0.34
   );
-  godRayMaterial.opacity = baseGodRayOpacity * uiState.brightness;
-  const godRay = new THREE.Mesh(godRayGeometry, godRayMaterial);
   const godRayRadiusScale = THREE.MathUtils.mapLinear(
     radius,
     sphereConfig.minRadius,
@@ -444,16 +609,40 @@ function addSphere() {
     1.2,
     1.65
   );
-  const godRayLength = THREE.MathUtils.mapLinear(
+  const godRayLengthScale = THREE.MathUtils.mapLinear(
     radius,
     sphereConfig.minRadius,
     sphereConfig.maxRadius,
     7.5,
     11.5
   );
-  godRay.scale.set(godRayRadiusScale, godRayLength, godRayRadiusScale);
+  const noiseScaleX = THREE.MathUtils.mapLinear(
+    radius,
+    sphereConfig.minRadius,
+    sphereConfig.maxRadius,
+    0.95,
+    1.35
+  );
+  const noiseScaleY = THREE.MathUtils.mapLinear(
+    radius,
+    sphereConfig.minRadius,
+    sphereConfig.maxRadius,
+    1.15,
+    1.7
+  );
+
+  godRayMaterial.uniforms.uIntensity.value = baseGodRayStrength * uiState.brightness;
+  godRayMaterial.uniforms.uNoiseScale.value.set(noiseScaleX, noiseScaleY);
+
+  const godRay = new THREE.Mesh(godRayGeometry, godRayMaterial);
+  godRay.scale.set(godRayRadiusScale, godRayLengthScale, godRayRadiusScale);
   godRay.renderOrder = -5;
   mesh.add(godRay);
+
+  const scaledConeRadius = GOD_RAY_BASE_RADIUS * godRay.scale.x;
+  const scaledConeLength = GOD_RAY_BASE_HEIGHT * godRay.scale.y;
+  godRayMaterial.uniforms.uConeRadius.value = scaledConeRadius;
+  godRayMaterial.uniforms.uConeLength.value = scaledConeLength;
 
   const sphereData = {
     mesh,
@@ -471,13 +660,16 @@ function addSphere() {
     baseLightIntensity,
     colorIndex,
     godRay,
-    baseGodRayOpacity,
+    baseGodRayStrength,
+    godRayTimeOffset: Math.random() * 40,
     lastLightDirection: direction.clone()
   };
 
   setSphereLightColor(sphereData, colorIndex);
   updateSphereLightIntensity(sphereData);
+  updateSphereGodRayStrength(sphereData);
   updateSphereLightDirection(sphereData);
+  updateSphereGodRayTime(sphereData, 0);
 
   spheres.push(sphereData);
 }
@@ -550,10 +742,7 @@ function updateBrightness(level) {
 
   spheres.forEach((sphere) => {
     updateSphereLightIntensity(sphere);
-    if (sphere.godRay && sphere.godRay.material) {
-      const baseOpacity = sphere.baseGodRayOpacity || 0.28;
-      sphere.godRay.material.opacity = baseOpacity * value;
-    }
+    updateSphereGodRayStrength(sphere, value);
   });
   renderer.toneMappingExposure = 1.25 * value;
 }
