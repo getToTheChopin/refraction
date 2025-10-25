@@ -54,12 +54,19 @@ const controlsInertia = {
   decayStrength: 7.5
 };
 
+const cameraOrbitOffset = new THREE.Vector3();
+const cameraOrbitSpherical = new THREE.Spherical();
+const cameraOrbitDelta = { theta: 0, phi: 0 };
+const cameraOrbitEpsilon = 1e-7;
+
 controls.addEventListener("start", () => {
   controlsInertia.isDragging = true;
   controlsInertia.azimuthalVelocity = 0;
   controlsInertia.polarVelocity = 0;
   controlsInertia.lastAzimuthalAngle = controls.getAzimuthalAngle();
   controlsInertia.lastPolarAngle = controls.getPolarAngle();
+  cameraOrbitDelta.theta = 0;
+  cameraOrbitDelta.phi = 0;
 });
 
 controls.addEventListener("end", () => {
@@ -929,6 +936,33 @@ function resolveSphereCollision(a, b, restitution) {
   return collisionOccurred;
 }
 
+function rotateCameraBy(azimuthDelta, polarDelta) {
+  if (azimuthDelta === 0 && polarDelta === 0) {
+    return;
+  }
+
+  cameraOrbitOffset.copy(camera.position).sub(controls.target);
+  cameraOrbitSpherical.setFromVector3(cameraOrbitOffset);
+
+  cameraOrbitSpherical.theta += azimuthDelta;
+  cameraOrbitSpherical.phi = THREE.MathUtils.clamp(
+    cameraOrbitSpherical.phi + polarDelta,
+    controls.minPolarAngle,
+    controls.maxPolarAngle
+  );
+  cameraOrbitSpherical.makeSafe();
+
+  cameraOrbitSpherical.radius = THREE.MathUtils.clamp(
+    cameraOrbitSpherical.radius,
+    controls.minDistance,
+    controls.maxDistance
+  );
+
+  cameraOrbitOffset.setFromSpherical(cameraOrbitSpherical);
+  camera.position.copy(controls.target).add(cameraOrbitOffset);
+  camera.lookAt(controls.target);
+}
+
 function applyCameraInertia(delta) {
   if (!controlsInertia || controlsInertia.isDragging) {
     return;
@@ -939,11 +973,38 @@ function applyCameraInertia(delta) {
   const minVelocity = controlsInertia.minVelocity;
 
   if (Math.abs(azimuthalVelocity) > minVelocity) {
-    controls.rotateLeft(-azimuthalVelocity * delta);
+    cameraOrbitDelta.theta += azimuthalVelocity * delta;
   }
 
   if (Math.abs(polarVelocity) > minVelocity) {
-    controls.rotateUp(-polarVelocity * delta);
+    cameraOrbitDelta.phi += polarVelocity * delta;
+  }
+
+  if (Math.abs(cameraOrbitDelta.theta) > cameraOrbitEpsilon || Math.abs(cameraOrbitDelta.phi) > cameraOrbitEpsilon) {
+    const useDamping = controls.enableDamping && controls.dampingFactor > 0;
+    const dampingValue = useDamping ? THREE.MathUtils.clamp(controls.dampingFactor, 0, 1) : 1;
+    const thetaStep = useDamping ? cameraOrbitDelta.theta * dampingValue : cameraOrbitDelta.theta;
+    const phiStep = useDamping ? cameraOrbitDelta.phi * dampingValue : cameraOrbitDelta.phi;
+
+    if (Math.abs(thetaStep) > cameraOrbitEpsilon || Math.abs(phiStep) > cameraOrbitEpsilon) {
+      rotateCameraBy(thetaStep, phiStep);
+    }
+
+    if (useDamping) {
+      const retainFactor = 1 - dampingValue;
+      cameraOrbitDelta.theta *= retainFactor;
+      cameraOrbitDelta.phi *= retainFactor;
+    } else {
+      cameraOrbitDelta.theta = 0;
+      cameraOrbitDelta.phi = 0;
+    }
+
+    if (Math.abs(cameraOrbitDelta.theta) <= cameraOrbitEpsilon) {
+      cameraOrbitDelta.theta = 0;
+    }
+    if (Math.abs(cameraOrbitDelta.phi) <= cameraOrbitEpsilon) {
+      cameraOrbitDelta.phi = 0;
+    }
   }
 
   const decay = Math.exp(-controlsInertia.decayStrength * delta);
