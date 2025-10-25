@@ -1,4 +1,15 @@
-import * as Tone from "tone";
+import * as ToneModule from "tone";
+
+const Tone = ToneModule?.Tone ?? ToneModule?.default ?? globalThis.Tone;
+
+const isToneAvailable =
+  !!Tone &&
+  typeof Tone.PolySynth === "function" &&
+  typeof Tone.start === "function";
+
+if (!isToneAvailable && typeof console !== "undefined") {
+  console.warn("Tone.js failed to load; sound effects are disabled.");
+}
 
 const UNLOCK_EVENTS = ["pointerdown", "touchstart", "mousedown", "keydown"];
 
@@ -14,7 +25,7 @@ let unlockListenersAttached = false;
 let isInitialized = false;
 
 function ensureAudioGraph() {
-  if (synth) {
+  if (!isToneAvailable || synth) {
     return;
   }
 
@@ -72,7 +83,7 @@ function removeUnlockListeners() {
 }
 
 async function unlockAudio() {
-  if (isAudioUnlocked) {
+  if (!isToneAvailable || isAudioUnlocked) {
     return;
   }
 
@@ -92,7 +103,7 @@ async function handleUnlock() {
 }
 
 function attachUnlockListeners() {
-  if (typeof document === "undefined" || unlockListenersAttached || isAudioUnlocked) {
+  if (!isToneAvailable || typeof document === "undefined" || unlockListenersAttached || isAudioUnlocked) {
     return;
   }
 
@@ -109,6 +120,11 @@ export function initializeSoundEffects() {
   }
 
   isInitialized = true;
+
+  if (!isToneAvailable) {
+    return;
+  }
+
   ensureAudioGraph();
   attachUnlockListeners();
 }
@@ -143,6 +159,10 @@ function calculateImpactEnergy({ impactStrength = 0, baseSpeed = 0, radius = 1 }
 }
 
 function getNoteSet({ sphereType, radius, hue, energy }) {
+  if (!isToneAvailable) {
+    return [];
+  }
+
   const { root, intervals } = getScaleForSphereType(sphereType);
   const primaryInterval = intervals[Math.floor(Math.random() * intervals.length)];
   const radiusOffset = Math.round(clamp01((radius - 0.7) / 0.9));
@@ -174,6 +194,10 @@ export function playCollisionSound({
   sphereType = "generic",
   hue = null
 } = {}) {
+  if (!isToneAvailable) {
+    return;
+  }
+
   if (!synth) {
     ensureAudioGraph();
   }
