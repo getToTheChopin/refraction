@@ -77,164 +77,13 @@ const collisionRelativeVelocity = new THREE.Vector3();
 const collisionImpulse = new THREE.Vector3();
 const maintainTempDirection = new THREE.Vector3();
 const fallbackDirection = new THREE.Vector3();
-const godRayAlignmentVector = new THREE.Vector3(0, -1, 0);
 const defaultLightDirection = new THREE.Vector3(0, 1, 0);
-const lightDirectionTemp = new THREE.Vector3();
 const candidatePosition = new THREE.Vector3();
-const tempQuaternion = new THREE.Quaternion();
 
-const GOD_RAY_BASE_RADIUS = 1;
-const GOD_RAY_BASE_HEIGHT = 1.6;
-
-const godRayGeometry = new THREE.ConeGeometry(GOD_RAY_BASE_RADIUS, GOD_RAY_BASE_HEIGHT, 36, 1, true);
-godRayGeometry.translate(0, -GOD_RAY_BASE_HEIGHT * 0.5, 0);
-godRayGeometry.name = "SphereGodRayGeometry";
-
-const godRayVertexShader = /* glsl */ `
-  varying vec3 vWorldPosition;
-  varying vec3 vOrigin;
-  varying vec3 vAxisDirection;
-
-  void main() {
-    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-    vWorldPosition = worldPosition.xyz;
-    vOrigin = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-    vAxisDirection = normalize((modelMatrix * vec4(0.0, -1.0, 0.0, 0.0)).xyz);
-    gl_Position = projectionMatrix * viewMatrix * worldPosition;
-  }
-`;
-
-const godRayFragmentShader = /* glsl */ `
-  precision highp float;
-
-  varying vec3 vWorldPosition;
-  varying vec3 vOrigin;
-  varying vec3 vAxisDirection;
-
-  uniform vec3 uColor;
-  uniform float uTime;
-  uniform float uIntensity;
-  uniform float uConeRadius;
-  uniform float uConeLength;
-  uniform vec2 uNoiseScale;
-
-  float hash(vec3 p) {
-    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
-    p += dot(p, p.yzx + 19.19);
-    return fract(p.x * p.y * p.z);
-  }
-
-  float noise(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-
-    float n000 = hash(i + vec3(0.0, 0.0, 0.0));
-    float n100 = hash(i + vec3(1.0, 0.0, 0.0));
-    float n010 = hash(i + vec3(0.0, 1.0, 0.0));
-    float n110 = hash(i + vec3(1.0, 1.0, 0.0));
-    float n001 = hash(i + vec3(0.0, 0.0, 1.0));
-    float n101 = hash(i + vec3(1.0, 0.0, 1.0));
-    float n011 = hash(i + vec3(0.0, 1.0, 1.0));
-    float n111 = hash(i + vec3(1.0, 1.0, 1.0));
-
-    float nx00 = mix(n000, n100, f.x);
-    float nx10 = mix(n010, n110, f.x);
-    float nx01 = mix(n001, n101, f.x);
-    float nx11 = mix(n011, n111, f.x);
-
-    float nxy0 = mix(nx00, nx10, f.y);
-    float nxy1 = mix(nx01, nx11, f.y);
-
-    return mix(nxy0, nxy1, f.z);
-  }
-
-  const int MARCH_STEPS = 8;
-
-  void main() {
-    vec3 toFragment = vWorldPosition - vOrigin;
-    float heightAlongAxis = dot(toFragment, -vAxisDirection);
-    if (heightAlongAxis < 0.0) {
-      discard;
-    }
-
-    float normalizedHeight = clamp(heightAlongAxis / uConeLength, 0.0, 1.0);
-
-    vec3 axisPoint = vOrigin + (-vAxisDirection) * heightAlongAxis;
-    float radialDistance = length(vWorldPosition - axisPoint);
-    float radiusAtHeight = mix(uConeRadius * 0.18, uConeRadius, normalizedHeight);
-    float radialRatio = radialDistance / max(radiusAtHeight, 1e-4);
-
-    if (radialRatio > 1.1) {
-      discard;
-    }
-
-    float baseDensity = smoothstep(1.1, 0.0, radialRatio);
-    float axialFalloff = smoothstep(1.12, 0.0, normalizedHeight);
-    float centerGlow = pow(1.0 - clamp(radialRatio, 0.0, 1.0), 6.0);
-
-    float marchStep = (uConeLength - heightAlongAxis) / float(MARCH_STEPS);
-    vec3 marchDirection = -vAxisDirection;
-    vec3 samplePoint = vWorldPosition;
-    float accumulated = 0.0;
-
-    for (int i = 0; i < MARCH_STEPS; i++) {
-      samplePoint += marchDirection * marchStep;
-      float sampleHeight = dot(samplePoint - vOrigin, -vAxisDirection);
-      float sampleNormHeight = clamp(sampleHeight / uConeLength, 0.0, 1.0);
-      vec3 sampleAxisPoint = vOrigin + (-vAxisDirection) * sampleHeight;
-      float sampleRadialDistance = length(samplePoint - sampleAxisPoint);
-      float sampleRadiusAtHeight = mix(uConeRadius * 0.18, uConeRadius, sampleNormHeight);
-      float normalizedSampleRadius = sampleRadialDistance / max(sampleRadiusAtHeight, 1e-4);
-      float sampleDensity = smoothstep(1.1, 0.0, normalizedSampleRadius) * smoothstep(1.05, 0.0, sampleNormHeight);
-      vec3 noisePoint = vec3(
-        samplePoint.x * uNoiseScale.x,
-        samplePoint.y * 0.35 + uTime * 0.25,
-        samplePoint.z * uNoiseScale.y
-      );
-      float n = noise(noisePoint);
-      accumulated += sampleDensity * mix(0.65, 1.15, n);
-    }
-
-    float averageScattering = accumulated / float(MARCH_STEPS);
-
-    vec3 shimmerPoint = vec3(
-      radialDistance * uNoiseScale.x,
-      heightAlongAxis * 0.3 + uTime * 0.45,
-      radialDistance * uNoiseScale.y
-    );
-    float shimmeringNoise = noise(shimmerPoint);
-
-    float softDiffuse = baseDensity * axialFalloff * mix(0.75, 1.25, shimmeringNoise);
-    float finalIntensity = (softDiffuse * 0.85 + averageScattering * 1.35 + centerGlow * 0.5) * uIntensity;
-
-    float alpha = clamp(finalIntensity, 0.0, 1.0);
-    gl_FragColor = vec4(uColor * finalIntensity, alpha);
-  }
-`;
-
-function createGodRayMaterial() {
-  const material = new THREE.ShaderMaterial({
-    uniforms: {
-      uColor: { value: new THREE.Color(0xffffff) },
-      uTime: { value: 0 },
-      uIntensity: { value: 0.3 },
-      uConeRadius: { value: GOD_RAY_BASE_RADIUS },
-      uConeLength: { value: GOD_RAY_BASE_HEIGHT },
-      uNoiseScale: { value: new THREE.Vector2(1.05, 1.35) }
-    },
-    vertexShader: godRayVertexShader,
-    fragmentShader: godRayFragmentShader,
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    toneMapped: false
-  });
-
-  material.name = "SphereGodRayMaterial";
-  return material;
-}
+const SphereType = Object.freeze({
+  GLOW: "glow",
+  GLASS: "glass"
+});
 
 function getRandomPaletteIndex(excludeIndex = null) {
   if (neonPastelPalette.length <= 1) {
@@ -254,115 +103,75 @@ function getRandomPaletteIndex(excludeIndex = null) {
 }
 
 function setSphereLightColor(sphere, paletteIndex) {
+  if (!sphere || sphere.type !== SphereType.GLOW) {
+    if (sphere) {
+      sphere.colorIndex = null;
+    }
+    return;
+  }
+
   const paletteLength = neonPastelPalette.length;
   const safeIndex = paletteLength > 0 ? THREE.MathUtils.euclideanModulo(paletteIndex, paletteLength) : 0;
   sphere.colorIndex = safeIndex;
   const colorHex = paletteLength > 0 ? neonPastelPalette[safeIndex] : 0xffffff;
+
   if (sphere.light) {
     sphere.light.color.setHex(colorHex);
   }
-  if (
-    sphere.godRay &&
-    sphere.godRay.material &&
-    sphere.godRay.material.uniforms &&
-    sphere.godRay.material.uniforms.uColor
-  ) {
-    sphere.godRay.material.uniforms.uColor.value.setHex(colorHex);
+
+  if (sphere.mesh && sphere.mesh.material && sphere.mesh.material.emissive) {
+    sphere.mesh.material.emissive.setHex(colorHex);
   }
 }
 
 function cycleSphereLightColor(sphere) {
+  if (!sphere || sphere.type !== SphereType.GLOW) {
+    return;
+  }
+
   const currentIndex = typeof sphere.colorIndex === "number" ? sphere.colorIndex : null;
   const nextIndex = getRandomPaletteIndex(currentIndex);
   setSphereLightColor(sphere, nextIndex);
 }
 
 function updateSphereLightIntensity(sphere) {
-  if (!sphere.light) {
+  if (!sphere || !sphere.mesh || !sphere.mesh.material) {
     return;
   }
 
-  sphere.light.intensity = sphere.baseLightIntensity * uiState.brightness;
-}
+  const baseEmissive = typeof sphere.baseEmissiveIntensity === "number" ? sphere.baseEmissiveIntensity : 0;
+  const baseLight = typeof sphere.baseLightIntensity === "number" ? sphere.baseLightIntensity : 0;
 
-function updateSphereGodRayStrength(sphere, brightnessMultiplier = uiState.brightness) {
-  if (
-    !sphere ||
-    !sphere.godRay ||
-    !sphere.godRay.material ||
-    !sphere.godRay.material.uniforms ||
-    !sphere.godRay.material.uniforms.uIntensity
-  ) {
-    return;
-  }
-
-  const baseStrength =
-    typeof sphere.baseGodRayStrength === "number" ? sphere.baseGodRayStrength : 0.28;
-  const safeBrightness = Math.max(brightnessMultiplier, 0);
-  sphere.godRay.material.uniforms.uIntensity.value = baseStrength * safeBrightness;
-}
-
-function updateSphereGodRayTime(sphere, time) {
-  if (
-    !sphere ||
-    !sphere.godRay ||
-    !sphere.godRay.material ||
-    !sphere.godRay.material.uniforms ||
-    !sphere.godRay.material.uniforms.uTime
-  ) {
-    return;
-  }
-
-  const offset = typeof sphere.godRayTimeOffset === "number" ? sphere.godRayTimeOffset : 0;
-  sphere.godRay.material.uniforms.uTime.value = time + offset;
-}
-
-function updateSphereLightDirection(sphere) {
-  const { light, lightTarget, velocity, radius, godRay } = sphere;
-  if (!light || !lightTarget) {
-    return;
-  }
-
-  if (!sphere.lastLightDirection) {
-    sphere.lastLightDirection = defaultLightDirection.clone();
-  }
-
-  lightDirectionTemp.copy(velocity);
-  const hasVelocity = lightDirectionTemp.lengthSq() > 1e-6;
-
-  if (hasVelocity) {
-    lightDirectionTemp.normalize();
+  if (sphere.type === SphereType.GLOW) {
+    if (sphere.light) {
+      sphere.light.intensity = baseLight * uiState.brightness;
+    }
+    sphere.mesh.material.emissiveIntensity = baseEmissive * uiState.brightness;
   } else {
-    lightDirectionTemp.copy(sphere.lastLightDirection);
-  }
-
-  if (lightDirectionTemp.lengthSq() < 1e-6) {
-    lightDirectionTemp.copy(defaultLightDirection);
-  }
-
-  sphere.lastLightDirection.copy(lightDirectionTemp);
-
-  const targetDistance = Math.max(radius * 0.8, 0.1);
-  lightTarget.position.copy(lightDirectionTemp).multiplyScalar(targetDistance);
-
-  if (godRay) {
-    tempQuaternion.setFromUnitVectors(godRayAlignmentVector, lightDirectionTemp);
-    godRay.quaternion.copy(tempQuaternion);
+    if (sphere.light) {
+      sphere.light.intensity = 0;
+    }
+    sphere.mesh.material.emissiveIntensity = 0;
+    if (sphere.mesh.material.emissive) {
+      sphere.mesh.material.emissive.setRGB(0, 0, 0);
+    }
   }
 }
+
 
 function onSphereCollision(sphere) {
   cycleSphereLightColor(sphere);
 }
 
-const sphereSizeModes = [
-  { key: "standard", label: "Standard", minRadius: 0.65, maxRadius: 1.25 },
-  { key: "grand", label: "Grand", minRadius: 1.05, maxRadius: 1.5 }
-];
-const defaultSphereSizeMode = sphereSizeModes[0];
+const baseSphereSize = {
+  minRadius: 0.65,
+  maxRadius: 1.25
+};
+
+const sphereSizeScaleRange = { min: 0.75, max: 1.35 };
 const sphereConfig = {
-  minRadius: defaultSphereSizeMode.minRadius,
-  maxRadius: defaultSphereSizeMode.maxRadius
+  minRadius: baseSphereSize.minRadius,
+  maxRadius: baseSphereSize.maxRadius
 };
 
 const sphereSpeedRange = { min: 1.9, max: 2.8 };
@@ -374,7 +183,7 @@ const brightnessRange = { min: 0.6, max: 1.8 };
 const speedRange = { min: 0.5, max: 3 };
 
 const uiState = {
-  sphereSizeMode: defaultSphereSizeMode.key,
+  sphereSizeScale: 1,
   sphereCount: 12,
   refraction: 1.52,
   brightness: 1,
@@ -388,7 +197,7 @@ const motionState = {
 const uiElements = {
   sphereCountInput: document.getElementById("sphere-count"),
   sphereCountValue: document.querySelector('[data-value-for="sphere-count"]'),
-  sphereSizeButton: document.getElementById("sphere-size-toggle"),
+  sphereSizeInput: document.getElementById("sphere-size"),
   sphereSizeValue: document.querySelector('[data-value-for="sphere-size"]'),
   refractionInput: document.getElementById("refraction-level"),
   refractionValue: document.querySelector('[data-value-for="refraction-level"]'),
@@ -398,7 +207,7 @@ const uiElements = {
   speedValue: document.querySelector('[data-value-for="movement-speed"]')
 };
 
-setSphereSizeMode(uiState.sphereSizeMode, { rebuild: false });
+updateSphereSize(uiState.sphereSizeScale, { rebuild: false });
 
 updateSphereCount(uiState.sphereCount);
 updateRefraction(uiState.refraction);
@@ -447,11 +256,20 @@ function updateSpheres(delta, time) {
 
     const hue = (sphere.hue + time * hueDrift) % 1;
     const material = mesh.material;
-    material.attenuationColor.setHSL(hue, sphere.saturation, sphere.lightness + 0.1);
-    if (material.sheenColor) {
-      material.sheenColor.setHSL((hue + 0.05) % 1, sphere.saturation * 0.6, 0.6);
+
+    if (sphere.type === SphereType.GLOW) {
+      material.attenuationColor.setHSL(hue, sphere.saturation, sphere.lightness + 0.1);
+      if (material.sheenColor) {
+        material.sheenColor.setHSL((hue + 0.05) % 1, sphere.saturation * 0.6, 0.6);
+      }
+      material.envMapIntensity = 1.25 + Math.sin(time * 0.4 + sphere.phase) * 0.25;
+    } else {
+      material.attenuationColor.setHex(0xffffff);
+      if (material.sheenColor) {
+        material.sheenColor.setHSL(0.58, 0.08, 0.72);
+      }
+      material.envMapIntensity = 1.12 + Math.sin(time * 0.3 + sphere.phase) * 0.12;
     }
-    material.envMapIntensity = 1.25 + Math.sin(time * 0.4 + sphere.phase) * 0.25;
 
     if (collidedWithBounds) {
       onSphereCollision(sphere);
@@ -467,23 +285,20 @@ function updateSpheres(delta, time) {
   }
 
   for (let i = 0; i < count; i += 1) {
-    const sphere = spheres[i];
-    maintainSphereSpeed(sphere);
-    updateSphereLightDirection(sphere);
-    updateSphereGodRayTime(sphere, time);
+    maintainSphereSpeed(spheres[i]);
   }
 }
 
 function maintainSphereSpeed(sphere) {
-  const { velocity, baseSpeed, lastLightDirection } = sphere;
+  const { velocity, baseSpeed } = sphere;
   if (!velocity || !Number.isFinite(baseSpeed) || baseSpeed <= 0) {
     return;
   }
 
   const currentSpeed = velocity.length();
   if (currentSpeed < 1e-6) {
-    if (lastLightDirection && lastLightDirection.lengthSq() > 1e-6) {
-      maintainTempDirection.copy(lastLightDirection);
+    if (sphere.lastMovementDirection && sphere.lastMovementDirection.lengthSq() > 1e-6) {
+      maintainTempDirection.copy(sphere.lastMovementDirection);
     } else {
       fallbackDirection.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
       if (fallbackDirection.lengthSq() < 1e-6) {
@@ -498,6 +313,10 @@ function maintainSphereSpeed(sphere) {
 
     maintainTempDirection.normalize();
     velocity.copy(maintainTempDirection).multiplyScalar(baseSpeed);
+    if (!sphere.lastMovementDirection) {
+      sphere.lastMovementDirection = new THREE.Vector3();
+    }
+    sphere.lastMovementDirection.copy(maintainTempDirection);
     return;
   }
 
@@ -505,6 +324,11 @@ function maintainSphereSpeed(sphere) {
   if (speedDelta > baseSpeed * 0.0005) {
     velocity.multiplyScalar(baseSpeed / currentSpeed);
   }
+
+  if (!sphere.lastMovementDirection) {
+    sphere.lastMovementDirection = new THREE.Vector3();
+  }
+  sphere.lastMovementDirection.copy(velocity).normalize();
 }
 
 function updateSphereCount(count) {
@@ -532,11 +356,24 @@ function addSphere() {
   const radius = THREE.MathUtils.lerp(sphereConfig.minRadius, sphereConfig.maxRadius, Math.random());
   const geometry = new THREE.SphereGeometry(radius, 48, 48);
 
+  const type = spheres.length % 2 === 0 ? SphereType.GLOW : SphereType.GLASS;
   const hue = Math.random();
-  const saturation = 0.45 + Math.random() * 0.25;
-  const lightness = 0.45 + Math.random() * 0.25;
-  const attenuationColor = new THREE.Color().setHSL(hue, saturation, lightness + 0.1);
-  const sheenColor = new THREE.Color().setHSL((hue + 0.05) % 1, saturation * 0.6, 0.6);
+  const glowSaturation = 0.45 + Math.random() * 0.25;
+  const glowLightness = 0.45 + Math.random() * 0.25;
+  const glassLightness = 0.56 + Math.random() * 0.08;
+
+  const saturation = type === SphereType.GLOW ? glowSaturation : 0;
+  const lightness = type === SphereType.GLOW ? glowLightness : glassLightness;
+
+  const attenuationColor =
+    type === SphereType.GLOW
+      ? new THREE.Color().setHSL(hue, glowSaturation, glowLightness + 0.1)
+      : new THREE.Color(0xffffff);
+  const sheenColor =
+    type === SphereType.GLOW
+      ? new THREE.Color().setHSL((hue + 0.05) % 1, glowSaturation * 0.6, 0.6)
+      : new THREE.Color().setHSL(0.58, 0.1, 0.72);
+
   const baseThickness = radius * (1.8 + Math.random() * 0.6);
   const currentRefraction = THREE.MathUtils.clamp(uiState.refraction, refractionRange.min, refractionRange.max);
   const thicknessScale = THREE.MathUtils.mapLinear(
@@ -546,24 +383,28 @@ function addSphere() {
     thicknessScaleRange.min,
     thicknessScaleRange.max
   );
+  const attenuationDistance =
+    type === SphereType.GLOW ? 1.4 + Math.random() * 1.4 : THREE.MathUtils.randFloat(3.6, 5.2);
 
   const material = new THREE.MeshPhysicalMaterial({
     color: new THREE.Color(0xffffff),
     transmission: 1,
-    roughness: 0.04,
+    roughness: type === SphereType.GLOW ? 0.04 : 0.022,
     metalness: 0,
     clearcoat: 1,
-    clearcoatRoughness: 0.05,
+    clearcoatRoughness: type === SphereType.GLOW ? 0.05 : 0.02,
     thickness: baseThickness * thicknessScale,
-    envMapIntensity: 1.35,
+    envMapIntensity: type === SphereType.GLOW ? 1.35 : 1.18,
     attenuationColor,
-    attenuationDistance: 1.4 + Math.random() * 1.4,
+    attenuationDistance,
     specularIntensity: 1,
     specularColor: new THREE.Color(0xffffff),
-    sheen: 0.4,
+    sheen: type === SphereType.GLOW ? 0.4 : 0.28,
     sheenColor,
-    sheenRoughness: 0.7,
-    ior: currentRefraction
+    sheenRoughness: type === SphereType.GLOW ? 0.7 : 0.55,
+    ior: currentRefraction,
+    emissive: new THREE.Color(0x000000),
+    emissiveIntensity: 0
   });
 
   const mesh = new THREE.Mesh(geometry, material);
@@ -579,81 +420,25 @@ function addSphere() {
   const baseSpeed = THREE.MathUtils.randFloat(sphereSpeedRange.min, sphereSpeedRange.max);
   const velocity = direction.clone().multiplyScalar(baseSpeed);
 
-  const colorIndex = getRandomPaletteIndex();
-  const baseLightIntensity = THREE.MathUtils.mapLinear(
-    radius,
-    sphereConfig.minRadius,
-    sphereConfig.maxRadius,
-    160,
-    260
-  );
-  const lightDistance = radius * 14;
-  const light = new THREE.SpotLight(
-    neonPastelPalette[colorIndex],
-    baseLightIntensity * uiState.brightness,
-    lightDistance,
-    Math.PI * 0.35,
-    0.6,
-    2
-  );
-  light.castShadow = false;
+  const colorIndex = type === SphereType.GLOW ? getRandomPaletteIndex() : null;
+  const baseLightIntensity =
+    type === SphereType.GLOW
+      ? THREE.MathUtils.mapLinear(radius, sphereConfig.minRadius, sphereConfig.maxRadius, 120, 220)
+      : 0;
+  const baseEmissiveIntensity =
+    type === SphereType.GLOW
+      ? THREE.MathUtils.mapLinear(radius, sphereConfig.minRadius, sphereConfig.maxRadius, 0.8, 1.4)
+      : 0;
 
-  const lightTarget = new THREE.Object3D();
-  lightTarget.position.set(0, 0, 1);
-  mesh.add(light);
-  mesh.add(lightTarget);
-  light.position.set(0, 0, 0);
-  light.target = lightTarget;
-
-  const godRayMaterial = createGodRayMaterial();
-  const baseGodRayStrength = THREE.MathUtils.mapLinear(
-    radius,
-    sphereConfig.minRadius,
-    sphereConfig.maxRadius,
-    0.24,
-    0.34
-  );
-  const godRayRadiusScale = THREE.MathUtils.mapLinear(
-    radius,
-    sphereConfig.minRadius,
-    sphereConfig.maxRadius,
-    1.2,
-    1.65
-  );
-  const godRayLengthScale = THREE.MathUtils.mapLinear(
-    radius,
-    sphereConfig.minRadius,
-    sphereConfig.maxRadius,
-    7.5,
-    11.5
-  );
-  const noiseScaleX = THREE.MathUtils.mapLinear(
-    radius,
-    sphereConfig.minRadius,
-    sphereConfig.maxRadius,
-    0.95,
-    1.35
-  );
-  const noiseScaleY = THREE.MathUtils.mapLinear(
-    radius,
-    sphereConfig.minRadius,
-    sphereConfig.maxRadius,
-    1.15,
-    1.7
-  );
-
-  godRayMaterial.uniforms.uIntensity.value = baseGodRayStrength * uiState.brightness;
-  godRayMaterial.uniforms.uNoiseScale.value.set(noiseScaleX, noiseScaleY);
-
-  const godRay = new THREE.Mesh(godRayGeometry, godRayMaterial);
-  godRay.scale.set(godRayRadiusScale, godRayLengthScale, godRayRadiusScale);
-  godRay.renderOrder = -5;
-  mesh.add(godRay);
-
-  const scaledConeRadius = GOD_RAY_BASE_RADIUS * godRay.scale.x;
-  const scaledConeLength = GOD_RAY_BASE_HEIGHT * godRay.scale.y;
-  godRayMaterial.uniforms.uConeRadius.value = scaledConeRadius;
-  godRayMaterial.uniforms.uConeLength.value = scaledConeLength;
+  let light = null;
+  if (type === SphereType.GLOW) {
+    const paletteColor = neonPastelPalette[colorIndex ?? 0];
+    const lightDistance = radius * 18;
+    light = new THREE.PointLight(paletteColor, baseLightIntensity * uiState.brightness, lightDistance, 2);
+    light.castShadow = false;
+    mesh.add(light);
+    material.emissiveIntensity = baseEmissiveIntensity * uiState.brightness;
+  }
 
   const sphereData = {
     mesh,
@@ -667,20 +452,18 @@ function addSphere() {
     phase: Math.random() * Math.PI * 2,
     baseThickness,
     light,
-    lightTarget,
     baseLightIntensity,
     colorIndex,
-    godRay,
-    baseGodRayStrength,
-    godRayTimeOffset: Math.random() * 40,
-    lastLightDirection: direction.clone()
+    type,
+    baseEmissiveIntensity,
+    lastMovementDirection: direction.clone()
   };
 
-  setSphereLightColor(sphereData, colorIndex);
+  if (type === SphereType.GLOW) {
+    setSphereLightColor(sphereData, colorIndex);
+  }
+
   updateSphereLightIntensity(sphereData);
-  updateSphereGodRayStrength(sphereData);
-  updateSphereLightDirection(sphereData);
-  updateSphereGodRayTime(sphereData, 0);
 
   spheres.push(sphereData);
 }
@@ -697,19 +480,6 @@ function removeSphere() {
     }
     if (typeof sphere.light.dispose === "function") {
       sphere.light.dispose();
-    }
-  }
-
-  if (sphere.lightTarget && sphere.lightTarget.parent) {
-    sphere.lightTarget.parent.remove(sphere.lightTarget);
-  }
-
-  if (sphere.godRay) {
-    if (sphere.godRay.parent) {
-      sphere.godRay.parent.remove(sphere.godRay);
-    }
-    if (sphere.godRay.material) {
-      sphere.godRay.material.dispose();
     }
   }
 
@@ -753,7 +523,6 @@ function updateBrightness(level) {
 
   spheres.forEach((sphere) => {
     updateSphereLightIntensity(sphere);
-    updateSphereGodRayStrength(sphere, value);
   });
   renderer.toneMappingExposure = 1.25 * value;
 }
@@ -784,39 +553,16 @@ function setControlValue(element, value, { decimals = 2, suffix = "" } = {}) {
   element.textContent = `${textValue}${suffix}`;
 }
 
-function findSphereSizeMode(modeKey) {
-  if (!modeKey) {
-    return defaultSphereSizeMode;
+function updateSphereSize(scale, { rebuild = true } = {}) {
+  const clamped = THREE.MathUtils.clamp(scale, sphereSizeScaleRange.min, sphereSizeScaleRange.max);
+  uiState.sphereSizeScale = clamped;
+  sphereConfig.minRadius = baseSphereSize.minRadius * clamped;
+  sphereConfig.maxRadius = baseSphereSize.maxRadius * clamped;
+
+  if (uiElements.sphereSizeInput) {
+    uiElements.sphereSizeInput.value = clamped.toFixed(2);
   }
-
-  return sphereSizeModes.find((mode) => mode.key === modeKey) || defaultSphereSizeMode;
-}
-
-function getNextSphereSizeMode(modeKey) {
-  const currentIndex = sphereSizeModes.findIndex((mode) => mode.key === modeKey);
-  const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % sphereSizeModes.length;
-  return sphereSizeModes[nextIndex];
-}
-
-function updateSphereSizeUi(mode) {
-  if (uiElements.sphereSizeValue) {
-    setControlValue(uiElements.sphereSizeValue, mode.label, { decimals: null });
-  }
-
-  if (uiElements.sphereSizeButton) {
-    const nextMode = getNextSphereSizeMode(mode.key);
-    uiElements.sphereSizeButton.textContent = `Switch to ${nextMode.label}`;
-    const isDefaultMode = mode.key === defaultSphereSizeMode.key;
-    uiElements.sphereSizeButton.setAttribute("aria-pressed", isDefaultMode ? "false" : "true");
-  }
-}
-
-function setSphereSizeMode(modeKey, { rebuild = true } = {}) {
-  const mode = findSphereSizeMode(modeKey);
-  uiState.sphereSizeMode = mode.key;
-  sphereConfig.minRadius = mode.minRadius;
-  sphereConfig.maxRadius = mode.maxRadius;
-  updateSphereSizeUi(mode);
+  setControlValue(uiElements.sphereSizeValue, clamped, { decimals: 2, suffix: "×" });
 
   if (rebuild) {
     rebuildSpheresWithCurrentConfig();
@@ -836,10 +582,9 @@ function rebuildSpheresWithCurrentConfig() {
 }
 
 function initializeUiControls() {
-  if (uiElements.sphereSizeButton) {
-    uiElements.sphereSizeButton.addEventListener("click", () => {
-      const nextMode = getNextSphereSizeMode(uiState.sphereSizeMode);
-      setSphereSizeMode(nextMode.key);
+  if (uiElements.sphereSizeInput) {
+    uiElements.sphereSizeInput.addEventListener("input", (event) => {
+      updateSphereSize(Number(event.target.value));
     });
   }
 
