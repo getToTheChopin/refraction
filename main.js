@@ -1,8 +1,11 @@
 import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { initializeSoundEffects, playCollisionSound } from "./sound-effects.js";
 
 const container = document.getElementById("experience");
+
+initializeSoundEffects();
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
@@ -295,8 +298,19 @@ function updateSphereLightIntensity(sphere) {
 }
 
 
-function onSphereCollision(sphere) {
+function onSphereCollision(sphere, impactStrength = 0) {
+  if (!sphere) {
+    return;
+  }
+
   cycleSphereLightColor(sphere);
+  playCollisionSound({
+    impactStrength,
+    baseSpeed: typeof sphere.baseSpeed === "number" ? sphere.baseSpeed : 0,
+    radius: typeof sphere.radius === "number" ? sphere.radius : 1,
+    sphereType: typeof sphere.type === "string" ? sphere.type : "generic",
+    hue: typeof sphere.hue === "number" ? sphere.hue : null
+  });
 }
 
 const baseSphereSize = {
@@ -392,7 +406,7 @@ function updateSpheres(delta, time) {
 
     mesh.position.addScaledVector(velocity, effectiveDelta);
 
-    const collidedWithBounds = enforceBounds(sphere);
+    const boundsCollision = enforceBounds(sphere);
 
     const hue = (sphere.hue + time * hueDrift) % 1;
     const material = mesh.material;
@@ -435,8 +449,8 @@ function updateSpheres(delta, time) {
       material.envMapIntensity = 1.12 + Math.sin(time * 0.3 + sphere.phase) * 0.12;
     }
 
-    if (collidedWithBounds) {
-      onSphereCollision(sphere);
+    if (boundsCollision.collided) {
+      onSphereCollision(sphere, boundsCollision.impactStrength);
     }
   }
 
@@ -444,7 +458,11 @@ function updateSpheres(delta, time) {
     const a = spheres[i];
     for (let j = i + 1; j < count; j += 1) {
       const b = spheres[j];
-      resolveSphereCollision(a, b, restitution);
+      const collisionResult = resolveSphereCollision(a, b, restitution);
+      if (collisionResult.collided) {
+        onSphereCollision(a, collisionResult.impactStrength);
+        onSphereCollision(b, collisionResult.impactStrength);
+      }
     }
   }
 
@@ -834,38 +852,51 @@ function enforceBounds(sphere) {
   const position = mesh.position;
   const limit = halfRoom - radius;
   let collided = false;
+  let impactStrength = 0;
+
+  const registerImpact = (value) => {
+    if (value > impactStrength) {
+      impactStrength = value;
+    }
+  };
 
   if (position.x > limit) {
+    registerImpact(Math.abs(velocity.x));
     position.x = limit;
     velocity.x = -Math.abs(velocity.x);
     collided = true;
   } else if (position.x < -limit) {
+    registerImpact(Math.abs(velocity.x));
     position.x = -limit;
     velocity.x = Math.abs(velocity.x);
     collided = true;
   }
 
   if (position.y > limit) {
+    registerImpact(Math.abs(velocity.y));
     position.y = limit;
     velocity.y = -Math.abs(velocity.y);
     collided = true;
   } else if (position.y < -limit) {
+    registerImpact(Math.abs(velocity.y));
     position.y = -limit;
     velocity.y = Math.abs(velocity.y);
     collided = true;
   }
 
   if (position.z > limit) {
+    registerImpact(Math.abs(velocity.z));
     position.z = limit;
     velocity.z = -Math.abs(velocity.z);
     collided = true;
   } else if (position.z < -limit) {
+    registerImpact(Math.abs(velocity.z));
     position.z = -limit;
     velocity.z = Math.abs(velocity.z);
     collided = true;
   }
 
-  return collided;
+  return { collided, impactStrength };
 }
 
 function resolveSphereCollision(a, b, restitution) {
@@ -875,6 +906,7 @@ function resolveSphereCollision(a, b, restitution) {
   const minDistance = a.radius + b.radius;
   let distanceSq = collisionDelta.lengthSq();
   let collisionOccurred = false;
+  let impactStrength = 0;
 
   if (distanceSq === 0) {
     fallbackDirection.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
@@ -898,6 +930,16 @@ function resolveSphereCollision(a, b, restitution) {
 
     collisionRelativeVelocity.copy(a.velocity).sub(b.velocity);
     const velAlongNormal = collisionRelativeVelocity.dot(collisionNormal);
+    const relativeSpeed = collisionRelativeVelocity.length();
+    const averageSpeed = 0.5 * (a.velocity.length() + b.velocity.length());
+    const overlapRatio = minDistance > 0 ? overlap / minDistance : 0;
+
+    impactStrength = Math.max(
+      Math.abs(velAlongNormal),
+      relativeSpeed * 0.35,
+      averageSpeed * overlapRatio,
+      overlapRatio * 0.8
+    );
 
     if (velAlongNormal > 0) {
       const impulseMagnitude = -((1 + restitution) * velAlongNormal) / 2;
@@ -928,12 +970,9 @@ function resolveSphereCollision(a, b, restitution) {
     }
   }
 
-  if (collisionOccurred) {
-    onSphereCollision(a);
-    onSphereCollision(b);
-  }
+  const clampedImpact = collisionOccurred ? Math.min(Math.max(impactStrength, 0.05), 6) : 0;
 
-  return collisionOccurred;
+  return { collided: collisionOccurred, impactStrength: clampedImpact };
 }
 
 function rotateCameraBy(azimuthDelta, polarDelta) {
