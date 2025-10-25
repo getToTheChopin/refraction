@@ -43,6 +43,29 @@ controls.minDistance = roomSize * 0.18;
 controls.maxDistance = roomSize * 1.8;
 controls.update();
 
+const controlsInertia = {
+  isDragging: false,
+  lastAzimuthalAngle: controls.getAzimuthalAngle(),
+  lastPolarAngle: controls.getPolarAngle(),
+  azimuthalVelocity: 0,
+  polarVelocity: 0,
+  maxVelocity: 8,
+  minVelocity: 0.00002,
+  decayStrength: 7.5
+};
+
+controls.addEventListener("start", () => {
+  controlsInertia.isDragging = true;
+  controlsInertia.azimuthalVelocity = 0;
+  controlsInertia.polarVelocity = 0;
+  controlsInertia.lastAzimuthalAngle = controls.getAzimuthalAngle();
+  controlsInertia.lastPolarAngle = controls.getPolarAngle();
+});
+
+controls.addEventListener("end", () => {
+  controlsInertia.isDragging = false;
+});
+
 const roomGeometry = new THREE.BoxGeometry(roomSize, roomSize, roomSize);
 const roomMaterial = new THREE.MeshPhysicalMaterial({
   side: THREE.BackSide,
@@ -85,6 +108,101 @@ const SphereType = Object.freeze({
   GLASS: "glass"
 });
 
+const glowRayGeometry = new THREE.PlaneGeometry(1, 1, 1, 1);
+
+function createGlowRayMaterial(colorHex) {
+  const color = new THREE.Color(colorHex);
+
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uColor: { value: color },
+      uBaseIntensity: { value: 1 },
+      uPulse: { value: 1 },
+      uRayDensity: { value: THREE.MathUtils.randFloat(6.0, 8.5) },
+      uRayFalloff: { value: THREE.MathUtils.randFloat(1.3, 2.1) },
+      uGlowStrength: { value: THREE.MathUtils.randFloat(2.2, 3.2) },
+      uNoiseShift: { value: Math.random() * 1000 }
+    },
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    vertexShader: `
+      varying vec2 vUv;
+
+      void main() {
+        vUv = uv;
+        vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * viewMatrix * worldPosition;
+      }
+    `,
+    fragmentShader: `
+      varying vec2 vUv;
+
+      uniform float uTime;
+      uniform vec3 uColor;
+      uniform float uBaseIntensity;
+      uniform float uPulse;
+      uniform float uRayDensity;
+      uniform float uRayFalloff;
+      uniform float uGlowStrength;
+      uniform float uNoiseShift;
+
+      float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+      }
+
+      float noise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+
+        float a = hash(i);
+        float b = hash(i + vec2(1.0, 0.0));
+        float c = hash(i + vec2(0.0, 1.0));
+        float d = hash(i + vec2(1.0, 1.0));
+
+        vec2 u = f * f * (3.0 - 2.0 * f);
+
+        return mix(a, b, u.x) +
+               (c - a) * u.y * (1.0 - u.x) +
+               (d - b) * u.x * u.y;
+      }
+
+      void main() {
+        vec2 centered = vUv * 2.0 - 1.0;
+        float radius = length(centered);
+
+        if (radius > 1.0) {
+          discard;
+        }
+
+        float angle = atan(centered.y, centered.x);
+        float rayWave = cos(angle * uRayDensity + uTime * 1.4 + uNoiseShift);
+        float rayMask = pow(max(rayWave, 0.0), uRayFalloff * 2.4);
+
+        vec2 noiseCoord = vec2(angle / 6.28318, radius);
+        noiseCoord *= 4.0;
+        noiseCoord += vec2(uTime * 0.1 + uNoiseShift, uTime * 0.13 + uNoiseShift * 0.5);
+
+        float animatedNoise = noise(noiseCoord);
+        float streakFalloff = pow(max(0.0, 1.0 - radius * 1.2), 1.6);
+        float rays = rayMask * streakFalloff * (0.65 + 0.35 * animatedNoise);
+
+        float glow = exp(-radius * radius * uGlowStrength);
+
+        float intensity = uBaseIntensity * uPulse;
+        float alpha = clamp((glow * 0.75 + rays) * intensity, 0.0, 1.0);
+        vec3 color = uColor * (glow * 1.4 + rays * 2.8) * intensity;
+
+        gl_FragColor = vec4(color, alpha);
+      }
+    `
+  });
+}
+
+
 function getRandomPaletteIndex(excludeIndex = null) {
   if (neonPastelPalette.length <= 1) {
     return 0;
@@ -122,6 +240,10 @@ function setSphereLightColor(sphere, paletteIndex) {
   if (sphere.mesh && sphere.mesh.material && sphere.mesh.material.emissive) {
     sphere.mesh.material.emissive.setHex(colorHex);
   }
+
+  if (sphere.glowMaterial && sphere.glowMaterial.uniforms && sphere.glowMaterial.uniforms.uColor) {
+    sphere.glowMaterial.uniforms.uColor.value.setHex(colorHex);
+  }
 }
 
 function cycleSphereLightColor(sphere) {
@@ -141,12 +263,19 @@ function updateSphereLightIntensity(sphere) {
 
   const baseEmissive = typeof sphere.baseEmissiveIntensity === "number" ? sphere.baseEmissiveIntensity : 0;
   const baseLight = typeof sphere.baseLightIntensity === "number" ? sphere.baseLightIntensity : 0;
+  const baseGlow = typeof sphere.baseGlowIntensity === "number" ? sphere.baseGlowIntensity : 0;
 
   if (sphere.type === SphereType.GLOW) {
+    const brightness = uiState.brightness;
+
     if (sphere.light) {
-      sphere.light.intensity = baseLight * uiState.brightness;
+      sphere.light.intensity = baseLight * brightness;
     }
-    sphere.mesh.material.emissiveIntensity = baseEmissive * uiState.brightness;
+    sphere.mesh.material.emissiveIntensity = baseEmissive * brightness;
+
+    if (sphere.glowMaterial && sphere.glowMaterial.uniforms && sphere.glowMaterial.uniforms.uBaseIntensity) {
+      sphere.glowMaterial.uniforms.uBaseIntensity.value = baseGlow * brightness;
+    }
   } else {
     if (sphere.light) {
       sphere.light.intensity = 0;
@@ -234,8 +363,12 @@ function renderLoop() {
   const delta = Math.min(clock.getDelta(), 0.033);
   elapsedTime += delta;
 
-  updateSpheres(delta, elapsedTime);
+  applyCameraInertia(delta);
   controls.update();
+  updateCameraInertiaTracking(delta);
+
+  updateSpheres(delta, elapsedTime);
+  updateGlowBillboards();
 
   renderer.render(scene, camera);
 }
@@ -262,7 +395,31 @@ function updateSpheres(delta, time) {
       if (material.sheenColor) {
         material.sheenColor.setHSL((hue + 0.05) % 1, sphere.saturation * 0.6, 0.6);
       }
-      material.envMapIntensity = 1.25 + Math.sin(time * 0.4 + sphere.phase) * 0.25;
+      material.envMapIntensity = 1.35 + Math.sin(time * 0.4 + sphere.phase) * 0.28;
+
+      const pulseOffset = typeof sphere.glowPulseOffset === "number" ? sphere.glowPulseOffset : sphere.phase;
+      if (sphere.light) {
+        const flicker = 0.92 + Math.sin(time * 1.3 + pulseOffset * 1.2) * 0.08;
+        sphere.light.intensity = sphere.baseLightIntensity * uiState.brightness * flicker;
+      }
+
+      const emissivePulse = 0.85 + Math.sin(time * 1.1 + pulseOffset * 0.8) * 0.15;
+      material.emissiveIntensity = sphere.baseEmissiveIntensity * uiState.brightness * emissivePulse;
+
+      if (sphere.glowMaterial && sphere.glowMaterial.uniforms) {
+        const uniforms = sphere.glowMaterial.uniforms;
+        uniforms.uTime.value = time;
+        if (uniforms.uPulse) {
+          const pulse = 0.82 + Math.sin(time * 1.4 + pulseOffset) * 0.18;
+          uniforms.uPulse.value = pulse;
+        }
+      }
+
+      if (sphere.glowMesh) {
+        const scalePulse = 0.94 + Math.sin(time * 0.8 + pulseOffset * 0.7) * 0.08;
+        const targetScale = sphere.glowScale * scalePulse;
+        sphere.glowMesh.scale.set(targetScale, targetScale, targetScale);
+      }
     } else {
       material.attenuationColor.setHex(0xffffff);
       if (material.sheenColor) {
@@ -423,21 +580,46 @@ function addSphere() {
   const colorIndex = type === SphereType.GLOW ? getRandomPaletteIndex() : null;
   const baseLightIntensity =
     type === SphereType.GLOW
-      ? THREE.MathUtils.mapLinear(radius, sphereConfig.minRadius, sphereConfig.maxRadius, 120, 220)
+      ? THREE.MathUtils.mapLinear(radius, sphereConfig.minRadius, sphereConfig.maxRadius, 160, 320)
       : 0;
   const baseEmissiveIntensity =
     type === SphereType.GLOW
-      ? THREE.MathUtils.mapLinear(radius, sphereConfig.minRadius, sphereConfig.maxRadius, 0.8, 1.4)
+      ? THREE.MathUtils.mapLinear(radius, sphereConfig.minRadius, sphereConfig.maxRadius, 1.6, 2.6)
+      : 0;
+  const baseGlowIntensity =
+    type === SphereType.GLOW
+      ? THREE.MathUtils.mapLinear(radius, sphereConfig.minRadius, sphereConfig.maxRadius, 1.45, 2.25)
       : 0;
 
   let light = null;
+  let glowMaterial = null;
+  let glowMesh = null;
+  let glowScale = radius;
+
   if (type === SphereType.GLOW) {
     const paletteColor = neonPastelPalette[colorIndex ?? 0];
-    const lightDistance = radius * 18;
-    light = new THREE.PointLight(paletteColor, baseLightIntensity * uiState.brightness, lightDistance, 2);
+    const lightDistance = radius * 22;
+    light = new THREE.PointLight(paletteColor, baseLightIntensity * uiState.brightness, lightDistance, 1.6);
+    light.decay = 1.6;
     light.castShadow = false;
     mesh.add(light);
     material.emissiveIntensity = baseEmissiveIntensity * uiState.brightness;
+
+    glowMaterial = createGlowRayMaterial(paletteColor);
+    if (glowMaterial.uniforms.uBaseIntensity) {
+      glowMaterial.uniforms.uBaseIntensity.value = baseGlowIntensity * uiState.brightness;
+    }
+    if (glowMaterial.uniforms.uPulse) {
+      glowMaterial.uniforms.uPulse.value = 1;
+    }
+
+    glowMesh = new THREE.Mesh(glowRayGeometry, glowMaterial);
+    glowScale = radius * THREE.MathUtils.randFloat(4.6, 5.4);
+    glowMesh.scale.set(glowScale, glowScale, glowScale);
+    glowMesh.position.copy(mesh.position);
+    glowMesh.renderOrder = 5;
+    glowMesh.frustumCulled = false;
+    sphereGroup.add(glowMesh);
   }
 
   const sphereData = {
@@ -456,7 +638,12 @@ function addSphere() {
     colorIndex,
     type,
     baseEmissiveIntensity,
-    lastMovementDirection: direction.clone()
+    lastMovementDirection: direction.clone(),
+    glowMaterial,
+    glowMesh,
+    baseGlowIntensity,
+    glowScale,
+    glowPulseOffset: Math.random() * Math.PI * 2
   };
 
   if (type === SphereType.GLOW) {
@@ -481,6 +668,13 @@ function removeSphere() {
     if (typeof sphere.light.dispose === "function") {
       sphere.light.dispose();
     }
+  }
+
+  if (sphere.glowMesh) {
+    sphereGroup.remove(sphere.glowMesh);
+  }
+  if (sphere.glowMaterial && typeof sphere.glowMaterial.dispose === "function") {
+    sphere.glowMaterial.dispose();
   }
 
   sphereGroup.remove(sphere.mesh);
@@ -733,6 +927,84 @@ function resolveSphereCollision(a, b, restitution) {
   }
 
   return collisionOccurred;
+}
+
+function applyCameraInertia(delta) {
+  if (!controlsInertia || controlsInertia.isDragging) {
+    return;
+  }
+
+  const azimuthalVelocity = controlsInertia.azimuthalVelocity;
+  const polarVelocity = controlsInertia.polarVelocity;
+  const minVelocity = controlsInertia.minVelocity;
+
+  if (Math.abs(azimuthalVelocity) > minVelocity) {
+    controls.rotateLeft(-azimuthalVelocity * delta);
+  }
+
+  if (Math.abs(polarVelocity) > minVelocity) {
+    controls.rotateUp(-polarVelocity * delta);
+  }
+
+  const decay = Math.exp(-controlsInertia.decayStrength * delta);
+  controlsInertia.azimuthalVelocity *= decay;
+  controlsInertia.polarVelocity *= decay;
+
+  if (Math.abs(controlsInertia.azimuthalVelocity) < minVelocity) {
+    controlsInertia.azimuthalVelocity = 0;
+  }
+  if (Math.abs(controlsInertia.polarVelocity) < minVelocity) {
+    controlsInertia.polarVelocity = 0;
+  }
+}
+
+function updateCameraInertiaTracking(delta) {
+  if (!controlsInertia) {
+    return;
+  }
+
+  const currentAzimuth = controls.getAzimuthalAngle();
+  const currentPolar = controls.getPolarAngle();
+
+  if (controlsInertia.isDragging && delta > 1e-6) {
+    const azimuthDelta = shortestAngleDifference(currentAzimuth, controlsInertia.lastAzimuthalAngle);
+    const polarDelta = currentPolar - controlsInertia.lastPolarAngle;
+
+    const azimuthVelocity = azimuthDelta / delta;
+    const polarVelocity = polarDelta / delta;
+
+    controlsInertia.azimuthalVelocity = THREE.MathUtils.clamp(
+      THREE.MathUtils.lerp(controlsInertia.azimuthalVelocity, azimuthVelocity, 0.45),
+      -controlsInertia.maxVelocity,
+      controlsInertia.maxVelocity
+    );
+
+    controlsInertia.polarVelocity = THREE.MathUtils.clamp(
+      THREE.MathUtils.lerp(controlsInertia.polarVelocity, polarVelocity, 0.45),
+      -controlsInertia.maxVelocity,
+      controlsInertia.maxVelocity
+    );
+  }
+
+  controlsInertia.lastAzimuthalAngle = currentAzimuth;
+  controlsInertia.lastPolarAngle = currentPolar;
+}
+
+function updateGlowBillboards() {
+  for (let i = 0; i < spheres.length; i += 1) {
+    const sphere = spheres[i];
+    if (sphere.type !== SphereType.GLOW || !sphere.glowMesh) {
+      continue;
+    }
+
+    sphere.glowMesh.position.copy(sphere.mesh.position);
+    sphere.glowMesh.lookAt(camera.position);
+  }
+}
+
+function shortestAngleDifference(current, previous) {
+  const difference = current - previous;
+  return Math.atan2(Math.sin(difference), Math.cos(difference));
 }
 
 function generateNonCollidingPosition(radius) {
